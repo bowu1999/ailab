@@ -1,0 +1,66 @@
+seed: 42
+work_dir: ./work_dir
+resume_from: null
+dist:
+  backend: nccl
+  world_size: 1
+  init_method: env://
+amp:
+  enabled: true
+  opt_level: O1
+workflow:
+  - { phase: train, iters: 100 }
+  - { phase: val,   iters: 10 }
+  - { phase: test,  iters: 1 }
+total_epochs: 20
+hooks:
+  logger:
+    type: LoggerHook
+    interval: 20
+  checkpoint:
+    type: CheckpointHook
+    interval: 1
+  resume:
+    type: ResumeHook
+    enable: true
+  lr_scheduler:
+    type: LrSchedulerHook
+  ddp:
+    type: DDPHook
+  amp:
+    type: AMPHook
+  tensorboard:
+    type: TensorboardHook
+  wandb:
+    type: WandbHook
+data:
+  train:
+    type: DummyDataset
+    data_path: /path/to/train
+  val:
+    type: DummyDataset
+    data_path: /path/to/val
+  test:
+    type: DummyDataset
+    data_path: /path/to/test
+  train_dataloader:
+    batch_size: 32
+    shuffle: true
+  val_dataloader:
+    batch_size: 32
+    shuffle: false
+  test_dataloader:
+    batch_size: 32
+    shuffle: false
+model:
+  type: ResNet50
+  num_classes: 1000
+  pretrained: false
+optimizer:
+  type: Adam
+  lr: 0.001
+  weight_decay: 0.0001
+lr_scheduler:
+  type: StepLR
+  step_size: 10
+  gamma: 0.5
