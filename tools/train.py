@@ -13,9 +13,10 @@ import argparse
 import importlib.util
 import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.workflow import WorkFlow
-from src.utils.dist_utils import init_dist, DistSampler
+from src.utils.dist_utils import init_dist, DistSampler, DistributedSampler
 from src.hooks_extra import TensorboardHook, WandbHook
 from src.builder import build_dataset, build_model, build_optimizer
 
@@ -49,11 +50,21 @@ def main():
     is_dist = init_dist(cfg)
 
     # dataloaders
+    world_size = dist.get_world_size()
+    # 获取当前进程的rank
+    rank = dist.get_rank()
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    # 获取总的设备数量(world_size)
+    # world_size = dist.get_world_size()
     loaders = {}
     for phase in ['train', 'val', 'test']:
         if phase in cfg['data']:
             ds = build_dataset(cfg['data'][phase])
-            sampler = DistSampler(ds) if is_dist and phase == 'train' else None
+            sampler = DistributedSampler(
+                ds,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=True) if is_dist and phase == 'train' else None
             dl_cfg = cfg['data'][f'{phase}_dataloader'].copy()
             if sampler is not None and 'shuffle' in dl_cfg:
                 dl_cfg.pop('shuffle')
@@ -62,6 +73,8 @@ def main():
 
     # model & optimizer
     model = build_model(cfg['model'])
+    model = model.cuda(local_rank)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
     optimizer = build_optimizer(cfg['optimizer'], model.parameters())
 
     # workflow

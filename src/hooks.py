@@ -100,7 +100,7 @@ class LoggerHook(Hook):
 
         if phase == 'train':
             msgs.append(f"Iter[{wf.iter + 1}/{wf.max_iter}]")
-            msgs.append(f"Loss: {wf.last_loss:.4f}")
+            msgs.append(f"Loss: {wf.last_loss:.8f}")
         else:
             msgs.append(f"ValIter[{wf.val_iter + 1}]")  # 这里只是记录 batch 数
 
@@ -111,7 +111,7 @@ class LoggerHook(Hook):
             else:
                 val = get_by_path(wf, handler, default=None)
             if isinstance(val, float):
-                msgs.append(f"{name}: {val:.4f}")
+                msgs.append(f"{name}: {val:.8f}")
             else:
                 msgs.append(f"{name}: {val}")
         return msgs

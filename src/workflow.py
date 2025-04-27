@@ -53,12 +53,15 @@ class WorkFlow:
             inputs, targets = data[0], data[1]
         else:
             inputs, targets = data, None
-
+        # 将 inputs 和 targets 移动到模型所在的设备上
+        device = next(self.model.parameters()).device
+        if isinstance(inputs, torch.Tensor):
+            inputs = inputs.to(device, non_blocking=True)
+        if isinstance(targets, torch.Tensor):
+            targets = targets.to(device, non_blocking=True)
         outputs = self.model(inputs)
         self.last_outputs = outputs
-        # print(f"last_outputs : {self.last_outputs.shape}")
         self.last_targets = targets
-        # print(f"last_targets : {self.last_targets.shape}")
 
         return outputs, targets
 
@@ -109,6 +112,11 @@ class WorkFlow:
                 outputs, targets = self._call_model(batch)
                 if targets is None:
                     raise ValueError('Training data must return targets')
+
+                # 确保 outputs 和 targets 在同一设备上
+                device = outputs.device
+                if isinstance(targets, torch.Tensor):
+                    targets = targets.to(device)
 
                 loss = self.criterion(outputs, targets)
                 self.last_loss = loss.item() if hasattr(loss, 'item') else loss

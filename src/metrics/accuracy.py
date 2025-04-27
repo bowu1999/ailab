@@ -24,7 +24,7 @@ class Accuracy(Metric):
 
     def compute(self):
         return 100.0 * self.correct / self.total if self.total > 0 else 0.0
-    
+
     @property
     def avg(self):
         """方便 LoggerHook 直接读 .avg 获取当前平均值"""
