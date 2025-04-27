@@ -1,45 +1,200 @@
 # ailab
 深度学习模型训练流
 
+## 概览
+本仓库实现了一个轻量级的、借鉴 OpenMMLab 设计思路的深度学习框架（ailab），支持从数据集注册、模型构建，到训练（含 DDP 与 AMP）、日志记录（控制台、TensorBoard、Weights & Biases）、断点续训、评价指标、推理部署的全流程。用户只需编辑一个 YAML 配置文件，训练和推理脚本即可自动加载所有组件。
+
+## 特性
+模块化注册表：统一管理数据集、模型、优化器和指标
+
+配置驱动：一个 YAML 文件定义数据、模型、优化器、Hook、训练流程与分布式设置
+
+分布式训练：基于 NCCL 后端的 DDP，一键设置 torch.cuda.set_device 并在 barrier() 中指定 device_ids
+
+混合精度：可选 AMP（自动混合精度）支持
+
+Hook 系统：日志、断点续训、学习率调度、指标计算、TensorBoard & W&B 集成
+
+进度条和样本计数：使用 tqdm（仅 Rank 0 显示）
+
+断点续训：自动从检查点恢复，并支持动态学习率策略
+
+## 安装
+```bash
+git clone https://github.com/yourusername/ailab.git
+cd ailab
+pip install -r requirements.txt
+```
+依赖：
+```bash
+Python ≥3.7
+
+PyTorch ≥1.9（含 CUDA）
+
+torchvision
+
+mpi4py（用于分布式启动）
+
+wandb、tensorboard
+```
+## 项目结构
 ```bash
 ailab/
-├── configs/
-│   └── train.yaml              # 全流程配置：支持分布式、AMP、日志等
-├── datasets
-│   ├── __init__.py             # dataset 包
-│   └── base
-│   │   ├── __init__.py         # base 包
-│   │   └── _base.py            # 各种数据集接口
-|   │   └── cv_base_dataset.py  # 基于特定任务的数据集
-|   └── utils
-│   │   ├── __init__.py         # utils 包
-│   │   └── **.py               # 各种数据集需要的工具库
-│   └── custom_data.py          # 用户自定义数据集
-├── models/
-│   ├── __init__.py             # models 包
-│   └── base                    # 模型基类
-│   │   ├── __init__.py         # base 包
-│   │   └── resnet.py          # ResNet 模版
-│   │   └── **.py               # 各种模型接口
-│   └── resnet50.py             # 用户自定义 ResNet50
+├── configs/            # YAML 配置文件
+│   └── train.yaml
+├── datasets/           # 数据集类及工具
+├── metric/             # 指标实现
+├── models/             # 模型定义（ResNet 模板 + 用户模型）
 ├── src/
-│   ├── registry.py             # Registry 与模块注册
-│   ├── builder.py              # 构建器：datasets/models/optimizers
-│   ├── workflow.py             # WorkFlow：训练/验证/测试/分布式调度
-│   ├── hooks.py                # Hook：日志、断点、LR、分布式、AMP
-│   ├── hooks_extra.py          # Hook：TensorBoard、WandB
-│   └── utils/
-│       ├── logging.py          # 日志管理
-│       ├── checkpoint.py       # 检查点存取
-│       ├── lr_scheduler.py     # 学习率调度器
-│       ├── inference.py        # 推理接口
-│       └── dist_utils.py       # 分布式初始化 & Sampler
+│   ├── registry.py     # 全局注册表
+│   ├── builder.py      # 构建器：dataset/model/optimizer/metric
+│   ├── workflow.py     # WorkFlow：训练/验证/测试/分布式调度
+│   ├── hooks.py        # 核心 Hook
+│   ├── hooks_extra.py  # TensorBoard & W&B Hook
+│   └── utils/          # 日志、检查点、LR 调度、分布式工具、推理
 ├── tools/
-│   ├── train.py                # 训练脚本（支持单/多卡、AMP）
-│   ├── test.py                 # 验证脚本
-│   └── infer.py                # 推理脚本
-└── requirements.txt            # 依赖：torch, torchvision, mpi4py, wandb, tensorboard
+│   ├── train.py        # 训练入口脚本（支持 –config）
+│   ├── test.py         # 验证脚本
+│   └── infer.py        # 推理脚本
+└── requirements.txt
 ```
+## 快速开始
+编辑配置：复制并修改 configs/train.yaml
+
+启动训练（单/多卡均可）：
+
+```bash
+# 多卡（4 GPU）：
+torchrun --nproc_per_node=4 tools/train.py --config configs/train.yaml
+```
+查看日志：
+
+控制台：Rank 0 打印进度、Loss、指标
+
+TensorBoard：日志保存在 <work_dir>/tf_logs
+
+W&B（如启用）：在线 Dashboard
+
+断点续训：在配置文件中设置 resume_from 或自动从最新检查点恢复
+
+配置说明
+以下逐项说明 configs/train.yaml 中各字段含义：
+
+```yaml
+seed: 42                       # 随机种子
+work_dir: /path/to/ailab-workspace  # 工作目录
+resume_from: null              # 从该路径恢复模型
+dist:
+  backend: nccl                # 分布式后端
+  world_size: 4                # 进程总数
+  init_method: env://          # 初始化方法（用于 torchrun）  
+amp:
+  enabled: true                # 是否启用混合精度
+  opt_level: O1                # AMP 优化等级（兼容 Apex 旧接口）
+
+workflow:
+  - { phase: train, iters: 4 }  # 流程阶段（train/val/test），iters=None 表示遍历整个数据集
+  - { phase: val, iters: 4 }
+
+total_epochs: 20               # 总训练轮数
+
+hooks:
+  metrics:                     # 指标计算 Hook
+    type: MetricHook
+    top1:
+      type: "Accuracy"         # Accuracy 指标，topk=1
+      topk: 1
+    top5:
+      type: "Accuracy"         # Accuracy 指标，topk=5
+      topk: 5
+
+  checkpoint:                   # 检查点 Hook
+    type: CheckpointHook
+    interval: 1                 # 每多少 epoch 保存一次
+
+  resume:
+    type: ResumeHook
+    enable: true                # 如果设置了 resume_from，则自动加载
+
+  lr_scheduler:
+    type: LrSchedulerHook       # 学习率调度 Hook
+    scheduler:
+      type: StepLR
+      step_size: 10
+      gamma: 0.5
+
+  logger:                       # 日志打印 Hook
+    type: LoggerHook
+    interval: 1                 # 每多少 iterate 打印一次
+    log_dir: ${work_dir}/logs   # 日志目录（需支持变量插值）
+    log_items:
+      lr: "optimizer.param_groups.0.lr"
+      top1: "meters['top1'].avg"
+
+  ddp:
+    type: DDPHook               # 分布式数据并行 Hook
+
+  amp:
+    type: AMPHook               # 混合精度 Hook
+
+  tensorboard:
+    type: TensorboardHook       # TensorBoard Hook，写入 `<work_dir>/tf_logs`
+
+  wandb:
+    type: WandbHook             # Weights & Biases Hook
+    init_args:
+      project: my_project
+      name: ${experiment_name}  # 需支持变量插值
+      mode: disabled            # 'disabled' 或 'offline' 模式
+
+data:
+  train:
+    type: ClassificationImageDataset
+    annotation_file: /path/to/train.jsonl
+    x_key: image_path
+    y_key: category_id
+
+  val:
+    type: ClassificationImageDataset
+    annotation_file: /path/to/val.jsonl
+    x_key: image_path
+    y_key: category_id
+
+  train_dataloader:
+    batch_size: 8
+    shuffle: true
+
+  val_dataloader:
+    batch_size: 8
+    shuffle: false
+
+model:
+  type: resnet50               # 从 models/resnet50.py 加载
+  num_classes: 12
+  # pretrained: true           # 是否加载预训练权重
+
+optimizer:
+  type: Adam
+  lr: 0.001
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: StepLR
+  step_size: 10
+  gamma: 0.5
+```
+关于变量插值
+
+${work_dir}、${experiment_name} 等占位符需要使用支持插值的解析器（如 OmegaConf）或在加载前后自行替换。
+
+贡献指南
+Fork 本仓库并 clone
+
+创建分支 (git checkout -b feature/xxx)
+
+提交代码 (git commit -am 'Add feature')
+
+推送并发起 Pull Request
 
 # config 配置参数介绍
 ## 1. dist:

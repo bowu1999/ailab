@@ -7,9 +7,11 @@ root_dir = os.path.abspath(os.path.join(current_dir, '..'))
 sys.path.insert(0, root_dir)
 
 
-import yaml
+import torch
 import inspect
 import argparse
+import importlib.util
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from src.workflow import WorkFlow
@@ -24,13 +26,28 @@ def parse_args():
     return parser.parse_args()
 
 
+def _is_noarg_init(hook_cls):
+    sig = inspect.signature(hook_cls.__init__)
+    params = [p for p in sig.parameters.keys() if p != 'self']
+    return len(params) == 0
+
+
 def main():
     args = parse_args()
-    cfg = yaml.safe_load(open(args.config))
+    # ----- load Python config module -----
+    spec = importlib.util.spec_from_file_location("cfg_module", args.config)
+    cfg_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cfg_module)
+    # your config file must define a dict named `cfg`
+    try:
+        cfg = cfg_module.cfg
+    except AttributeError:
+        raise RuntimeError(f"Config file {args.config} must define a top-level `cfg` dict")
     os.makedirs(cfg['work_dir'], exist_ok=True)
 
     # init distributed
     is_dist = init_dist(cfg)
+
     # dataloaders
     loaders = {}
     for phase in ['train', 'val', 'test']:
@@ -41,6 +58,7 @@ def main():
             if sampler is not None and 'shuffle' in dl_cfg:
                 dl_cfg.pop('shuffle')
             loaders[phase] = DataLoader(ds, sampler=sampler, **dl_cfg)
+    # print(f"train samples: {len(loaders['train'].dataset)}")
 
     # model & optimizer
     model = build_model(cfg['model'])
@@ -55,29 +73,31 @@ def main():
 
     # hooks registration
     hooks = []
+    # 先把 MetricHook 放进来
+    if 'metrics' in cfg['hooks'] and cfg['hooks']['metrics'].get('enable', True):
+        from src.hooks import MetricHook
+        hooks.append(MetricHook(cfg['hooks']['metrics']))
+    # 然后再按常规流程注册其它 Hook
     for name, hook_cfg in cfg['hooks'].items():
-        if not hook_cfg.get('enable', True):
+        if name == 'metrics' or not hook_cfg.get('enable', True):
             continue
-        # 动态加载 HookClass
         module = __import__('src.hooks', fromlist=[hook_cfg['type']])
-        if hasattr(module, hook_cfg['type']):
-            HookClass = getattr(module, hook_cfg['type'])
-        else:
-            module_extra = __import__('src.hooks_extra', fromlist=[hook_cfg['type']])
-            HookClass = getattr(module_extra, hook_cfg['type'])
+        HookClass = getattr(module, hook_cfg['type'], None) \
+                    or getattr(__import__('src.hooks_extra', fromlist=[hook_cfg['type']]), hook_cfg['type'])
+        if hook_cfg['type'] == 'DDPHook':
+            hooks.append(HookClass())
+            continue
+        # Tensorboard 特殊传 work_dir
         if HookClass is TensorboardHook:
             hook_cfg['work_dir'] = cfg['work_dir']
             hooks.append(HookClass(hook_cfg))
-        # 根据 __init__ 参数决定传参
+            continue
         sig = inspect.signature(HookClass.__init__)
-        param_names = [p for p in sig.parameters.keys() if p != 'self']
-
-        if 'optimizer' in param_names:
+        params = [p for p in sig.parameters if p != 'self']
+        if 'optimizer' in params:
             hooks.append(HookClass(hook_cfg, optimizer))
-        elif 'cfg' in param_names or 'hook_cfg' in param_names:
-            hooks.append(HookClass(hook_cfg))
         else:
-            hooks.append(HookClass())
+            hooks.append(HookClass(hook_cfg))
 
     wf.register_hooks(hooks)
     wf.run(loaders, cfg['workflow'], cfg['total_epochs'])

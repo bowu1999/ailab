@@ -45,6 +45,7 @@ DATASETS      = Registry()
 MODELS        = Registry()
 OPTIMIZERS    = Registry()
 LR_SCHEDULERS = Registry()
+METRICS       = Registry()
 
 
 def auto_import_and_register_packages(package_path, package_name, registry):
@@ -117,3 +118,8 @@ if os.path.isdir(_optim_pkg):
 _schedulers_pkg = os.path.abspath(os.path.join(os.path.dirname(__file__), 'schedulers'))
 if os.path.isdir(_schedulers_pkg):
     auto_import_and_register_packages(_schedulers_pkg, 'src.schedulers', LR_SCHEDULERS)
+
+
+_metrics_pkg = os.path.abspath(os.path.join(os.path.dirname(__file__), 'metrics'))
+if os.path.isdir(_metrics_pkg):
+    auto_import_and_register_packages(_metrics_pkg, 'src.metrics', METRICS)

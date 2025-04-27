@@ -1,0 +1,20 @@
+# 忽略所有 .log 文件
+*.log
+
+# 忽略 build 目录
+/build/
+
+# 常见系统文件
+.DS_Store
+Thumbs.db
+
+# IDE 配置
+/.idea/
+/.vscode/
+
+# Node.js 依赖
+/node_modules/
+
+# Python 编译产物
+*.py[cod]
+__pycache__/       # 而不是 *__pycache__/

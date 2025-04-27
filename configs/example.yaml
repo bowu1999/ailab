@@ -9,14 +9,19 @@ amp:
   enabled: true
   opt_level: O1
 workflow:
-  - { phase: train, iters: 100 }
-  - { phase: val,   iters: 10 }
-  - { phase: test,  iters: 1 }
+  - { phase: train, iters: 100 } # 如果设置了 iters 则表示每个epoch 总共 100 iters，否则按照 samples num 和 batch size 计算
+  - { phase: val }
+  # - { phase: test }
 total_epochs: 20
 hooks:
-  logger:
-    type: LoggerHook
-    interval: 20
+  metrics:
+    type: MetricHook
+    top1:
+      type: "Accuracy"
+      topk: 1
+    top5:
+      type: "Accuracy"
+      topk: 5
   checkpoint:
     type: CheckpointHook
     interval: 1
@@ -31,6 +36,17 @@ hooks:
       type: StepLR
       step_size: 10
       gamma: 0.5
+  logger:
+    type: LoggerHook
+    interval: 1
+    log_dir: ${work_dir}/logs
+    log_items:
+      # 从 wf.optimizer.param_groups[0]['lr'] 里取 lr
+      lr: "optimizer.param_groups.0.lr"
+      # 从 wf.meters 这个字典里取 top1
+      top1: "meters['top1'].avg"
+      # 也可以直接写成 callable，但 yaml 里不能序列化函数，
+      # 如果想用 callable，则需要在代码里替换或动态注入
   ddp:
     type: DDPHook
   amp:
@@ -46,25 +62,25 @@ hooks:
 data:
   train:
     type: ClassificationImageDataset
-    annotation_file: /mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Data/006/Cabin/ClothingIndex/annos/train.jsonl
+    annotation_file: train.jsonl
     x_key: image_path
     y_key: category_id
   val:
     type: ClassificationImageDataset
-    annotation_file: /mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Data/006/Cabin/ClothingIndex/annos/val.jsonl
+    annotation_file: val.jsonl
     x_key: image_path
     y_key: category_id
   # test:
   #   type: ClassificationImageDataset
   #   data_path: /path/to/test
   train_dataloader:
-    batch_size: 32
+    batch_size: 8
     shuffle: true
   val_dataloader:
-    batch_size: 32
+    batch_size: 8
     shuffle: false
   # test_dataloader:
-  #   batch_size: 32
+  #   batch_size: 8
   #   shuffle: false
 model:
   type: resnet50
