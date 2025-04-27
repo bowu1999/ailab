@@ -1,9 +1,9 @@
 seed: 42
-work_dir: ./work_dir
+work_dir: /home/user/project/work_dir
 resume_from: null
 dist:
   backend: nccl
-  world_size: 1
+  world_size: 4
   init_method: env://
 amp:
   enabled: true
@@ -25,6 +25,12 @@ hooks:
     enable: true
   lr_scheduler:
     type: LrSchedulerHook
+    scheduler:
+      # 这里填写用的 PyTorch scheduler 名称及参数，
+      # 也可以写完整路径指向自定义 scheduler
+      type: StepLR
+      step_size: 10
+      gamma: 0.5
   ddp:
     type: DDPHook
   amp:
@@ -33,29 +39,37 @@ hooks:
     type: TensorboardHook
   wandb:
     type: WandbHook
+    init_args:
+      project: my_project
+      name: ${experiment_name}
+      mode: disabled
 data:
   train:
-    type: DummyDataset
-    data_path: /path/to/train
+    type: ClassificationImageDataset
+    annotation_file: /mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Data/006/Cabin/ClothingIndex/annos/train.jsonl
+    x_key: image_path
+    y_key: category_id
   val:
-    type: DummyDataset
-    data_path: /path/to/val
-  test:
-    type: DummyDataset
-    data_path: /path/to/test
+    type: ClassificationImageDataset
+    annotation_file: /mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Data/006/Cabin/ClothingIndex/annos/val.jsonl
+    x_key: image_path
+    y_key: category_id
+  # test:
+  #   type: ClassificationImageDataset
+  #   data_path: /path/to/test
   train_dataloader:
     batch_size: 32
     shuffle: true
   val_dataloader:
     batch_size: 32
     shuffle: false
-  test_dataloader:
-    batch_size: 32
-    shuffle: false
+  # test_dataloader:
+  #   batch_size: 32
+  #   shuffle: false
 model:
-  type: ResNet50
-  num_classes: 1000
-  pretrained: false
+  type: resnet50
+  num_classes: 12
+  # pretrained: false
 optimizer:
   type: Adam
   lr: 0.001
