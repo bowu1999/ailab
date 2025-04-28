@@ -6,3 +6,6 @@ class Metric:
         raise NotImplementedError
     def compute(self):
         raise NotImplementedError
+    @property
+    def avg(self):
+        return self.compute()
