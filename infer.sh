@@ -2,6 +2,13 @@
 
 CONFIG_FILE="/mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Code/006-Character_recognition/版本2-使用类型描述编码为数据标签进行训练/ailab-train-configs/example.py"
 
+CHECKPOINT_FILE="/mnt/volumes/vc-profile-bd-ga/others/wubo/Projects/Code/006-Character_recognition/版本2-使用类型描述编码为数据标签进行训练/ailab-workspace/epoch_172.pth"
+
+INPUT_FILE=""
+
+OUTPUT_FILE=""
+
+
 # 配置可见GPU
 all_gpu_ids=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ',' | sed 's/,$//')
 if [ -z "$1" ]; then
@@ -12,10 +19,8 @@ else
     echo "[LOG]: Visible GPUs: $GPUS"
 fi
 
-IFS=',' read -r -a array <<< "$GPUS"
-
-nproc_per_node=${#array[@]}
-
-CUDA_VISIBLE_DEVICES=$GPUS torchrun --nproc_per_node=$nproc_per_node \
-    --master_port=12345 -m ailab.tools.train \
-    --config $CONFIG_FILE
+CUDA_VISIBLE_DEVICES=$GPUS torchrun --nproc_per_node=4 --master_port=12345 tools/infer.py \
+    --config $CONFIG_FILE \
+    --ckpt $CHECKPOINT_FILE \
+    --input $INPUT_FILE \
+    --output $OUTPUT_FILE

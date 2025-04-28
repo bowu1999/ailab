@@ -2,7 +2,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from src.builder import build_metrics
+from ailab.builder import build_metrics
 from .utils.logging import get_logger
 from .utils.checkpoint import Checkpointer
 from .utils.lr_scheduler import build_scheduler

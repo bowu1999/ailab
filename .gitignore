@@ -17,4 +17,6 @@ Thumbs.db
 
 # Python 编译产物
 *.py[cod]
-__pycache__/       # 而不是 *__pycache__/
+__pycache__/
+
+*.egg-info

@@ -1,11 +1,16 @@
+# src/ailab/tools/train.py
 import os
 import sys
 
-# 动态添加项目根目录到路径
-current_dir = os.path.dirname(os.path.abspath(__file__))
-root_dir = os.path.abspath(os.path.join(current_dir, '..'))
-sys.path.insert(0, root_dir)
-
+# ---------------------------------------------------
+# Allow running without installation by adding src to PYTHONPATH
+# ---------------------------------------------------
+# current_dir = os.path.dirname(os.path.abspath(__file__))
+# project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
+# src_dir = os.path.join(project_root, 'src')
+# if src_dir not in sys.path:
+#     sys.path.insert(0, src_dir)
+# ---------------------------------------------------
 
 import torch
 import inspect
@@ -15,22 +20,16 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.workflow import WorkFlow
-from src.utils.dist_utils import init_dist, DistSampler, DistributedSampler
-from src.hooks_extra import TensorboardHook, WandbHook
-from src.builder import build_dataset, build_model, build_optimizer
+from ailab.workflow import WorkFlow
+from ailab.utils.dist_utils import init_dist, DistributedSampler
+from ailab.hooks_extra import TensorboardHook, WandbHook
+from ailab.builder import build_dataset, build_model, build_optimizer, build_loss
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a model with ailab framework')
-    parser.add_argument('-c', '--config', help='path to config file')
+    parser.add_argument('-c', '--config', required=True, help='path to config file')
     return parser.parse_args()
-
-
-def _is_noarg_init(hook_cls):
-    sig = inspect.signature(hook_cls.__init__)
-    params = [p for p in sig.parameters.keys() if p != 'self']
-    return len(params) == 0
 
 
 def main():
@@ -39,7 +38,6 @@ def main():
     spec = importlib.util.spec_from_file_location("cfg_module", args.config)
     cfg_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cfg_module)
-    # your config file must define a dict named `cfg`
     try:
         cfg = cfg_module.cfg
     except AttributeError:
@@ -50,12 +48,10 @@ def main():
     is_dist = init_dist(cfg)
 
     # dataloaders
-    world_size = dist.get_world_size()
-    # 获取当前进程的rank
-    rank = dist.get_rank()
+    world_size = dist.get_world_size() if is_dist else 1
+    rank = dist.get_rank() if is_dist else 0
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    # 获取总的设备数量(world_size)
-    # world_size = dist.get_world_size()
+
     loaders = {}
     for phase in ['train', 'val', 'test']:
         if phase in cfg['data']:
@@ -64,47 +60,65 @@ def main():
                 ds,
                 num_replicas=world_size,
                 rank=rank,
-                shuffle=True) if is_dist and phase == 'train' else None
+                shuffle=True) if is_dist else None
             dl_cfg = cfg['data'][f'{phase}_dataloader'].copy()
             if sampler is not None and 'shuffle' in dl_cfg:
                 dl_cfg.pop('shuffle')
             loaders[phase] = DataLoader(ds, sampler=sampler, **dl_cfg)
-    # print(f"train samples: {len(loaders['train'].dataset)}")
 
     # model & optimizer
     model = build_model(cfg['model'])
     model = model.cuda(local_rank)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    if is_dist:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
     optimizer = build_optimizer(cfg['optimizer'], model.parameters())
 
+    # criterion
+    criterion = build_loss(cfg['loss'])
+    if torch.cuda.is_available():
+        criterion = criterion.cuda(local_rank)
+    # Ensure weight tensor matches model output classes
+    if hasattr(criterion, 'weight') and criterion.weight is not None:
+        # attempt to infer num_classes from the model's last linear layer
+        model_for_inspect = model.module if hasattr(model, 'module') else model
+        num_classes = None
+        for m in reversed(list(model_for_inspect.modules())):
+            if hasattr(m, 'out_features'):
+                num_classes = m.out_features
+                break
+        if num_classes is not None and criterion.weight.numel() != num_classes:
+            import warnings
+            warnings.warn(
+                f"Loss weight length {criterion.weight.numel()} != model output classes {num_classes}, removing weight.")
+            criterion.register_buffer('weight', None)
+
     # workflow
-    from torch import nn
-    loss_cfg = cfg.get('loss', {})
-    criterion = getattr(nn, loss_cfg.get('type', 'CrossEntropyLoss'))(**loss_cfg.get('kwargs', {}))
-    # 传入 criterion
     wf = WorkFlow(cfg, model, optimizer, criterion)
 
     # hooks registration
     hooks = []
-    # 先把 MetricHook 放进来
     if 'metrics' in cfg['hooks'] and cfg['hooks']['metrics'].get('enable', True):
-        from src.hooks import MetricHook
+        from ailab.hooks import MetricHook
         hooks.append(MetricHook(cfg['hooks']['metrics']))
-    # 然后再按常规流程注册其它 Hook
+
     for name, hook_cfg in cfg['hooks'].items():
         if name == 'metrics' or not hook_cfg.get('enable', True):
             continue
-        module = __import__('src.hooks', fromlist=[hook_cfg['type']])
-        HookClass = getattr(module, hook_cfg['type'], None) \
-                    or getattr(__import__('src.hooks_extra', fromlist=[hook_cfg['type']]), hook_cfg['type'])
+        try:
+            module = importlib.import_module('ailab.hooks')
+            HookClass = getattr(module, hook_cfg['type'])
+        except (ImportError, AttributeError):
+            module = importlib.import_module('ailab.hooks_extra')
+            HookClass = getattr(module, hook_cfg['type'])
+
         if hook_cfg['type'] == 'DDPHook':
             hooks.append(HookClass())
             continue
-        # Tensorboard 特殊传 work_dir
         if HookClass is TensorboardHook:
             hook_cfg['work_dir'] = cfg['work_dir']
             hooks.append(HookClass(hook_cfg))
             continue
+
         sig = inspect.signature(HookClass.__init__)
         params = [p for p in sig.parameters if p != 'self']
         if 'optimizer' in params:

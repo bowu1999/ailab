@@ -4,7 +4,7 @@ import random
 import numpy as np
 from tqdm import tqdm
 
-from src.builder import build_metrics
+from ailab.builder import build_metrics
 
 
 def set_seed(seed):
@@ -92,44 +92,35 @@ class WorkFlow:
         world_size = self._get_world_size()
         total_iters = iters if iters is not None else len(loader)
         self.max_iter = total_iters
-
         is_main = int(os.environ.get('LOCAL_RANK', 0)) == 0
         pbar = tqdm(total=total_iters,
                     desc=f'Train Epoch {self.epoch}',
                     disable=not is_main)
         samples = 0
         data_iter = iter(loader)
-
         try:
             for _ in range(total_iters):
                 self.call_hook('before_train_iter')
-
                 try:
                     batch = next(data_iter)
                 except StopIteration:
                     break
-
                 outputs, targets = self._call_model(batch)
                 if targets is None:
                     raise ValueError('Training data must return targets')
-
                 # 确保 outputs 和 targets 在同一设备上
                 device = outputs.device
                 if isinstance(targets, torch.Tensor):
                     targets = targets.to(device)
-
                 loss = self.criterion(outputs, targets)
                 self.last_loss = loss.item() if hasattr(loss, 'item') else loss
-
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 self.iter += 1
-
                 # 累计样本数
                 bs = targets.size(0) if isinstance(targets, torch.Tensor) else targets[0].size(0)
                 samples += bs * world_size
-
                 if is_main:
                     pbar.set_postfix({'Samples': samples})
                 self.call_hook('after_train_iter')

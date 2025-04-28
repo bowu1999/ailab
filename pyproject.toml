@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ailab"
+version = "0.1.0"
+description = "AI 驱动的长途能源规划工具包"
+authors = [{ name="wubo", email="haohuawu1999@163.com" }]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Programming Language :: Python :: 3.12.9",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "torch>=1.13",
+  "torchvision",
+  "mpi4py",
+  "wandb",
+  "tensorboard",
+]
+
+[project.urls]
+"Source" = "https://github.com/bowu1999/ailab"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+# 在安装后会生成一个可执行命令：ailab-train
+ailab-train = "ailab.tools.train:main"
