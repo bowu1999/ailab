@@ -12,7 +12,7 @@ from ailab.metrics import Metric
 from ailab.registry import MODELS, DATASETS, LOSSES, METRICS
 from ailab import AnnotationFileLoadingDataset, load_dicts_from_jsonlines, std_transform
 
-from config import cfg
+from example_config import cfg
 
 
 

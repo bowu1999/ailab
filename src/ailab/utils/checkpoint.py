@@ -1,6 +1,7 @@
 import os
 import torch
 
+
 class Checkpointer:
     def __init__(self, save_dir):
         os.makedirs(save_dir, exist_ok=True)
@@ -15,7 +16,8 @@ class Checkpointer:
         }, path)
 
     def resume(self, model, optimizer, ckpt_path):
-        ckpt = torch.load(ckpt_path)
+        # 设置 map_location 为 'cpu'，以避免加载到不存在的 CUDA 设备上
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         model.load_state_dict(ckpt['model_state'])
         optimizer.load_state_dict(ckpt['optimizer_state'])
         return ckpt['epoch']

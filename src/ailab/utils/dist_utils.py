@@ -47,7 +47,7 @@ def init_dist(cfg):
             world_size=world_size,
             rank=rank
         )
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         return True
 
     return False

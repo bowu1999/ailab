@@ -7,8 +7,6 @@ cfg = dict(
     seed = 42,
     # 工作目录
     work_dir = work_dir,
-    # 从哪个 checkpoint 恢复训练
-    resume_from = "/path/ailab-workspace-250428/epoch_200.pth",
     # 分布式配置
     dist = dict(
         backend = "nccl",
@@ -25,7 +23,7 @@ cfg = dict(
         {"phase": "val"},
         # {"phase": "test"}, 
     ],
-    total_epochs = 100,
+    total_epochs = 300,
     # 钩子 (Hooks)
     hooks = dict(
         # 指标钩子：自动统计 top1/top5
@@ -42,7 +40,7 @@ cfg = dict(
         # 断点续训
         resume = dict(
             type   = "ResumeHook",
-            enable = True,
+            resume_from = "/path/ailab-workspace-250428/epoch_200.pth",
         ),
         # 学习率调度
         lr_scheduler = dict(

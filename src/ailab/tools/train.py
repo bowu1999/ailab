@@ -21,7 +21,7 @@ def ailab_train(cfg):
     is_dist = init_dist(cfg)
 
     # info
-    world_size = dist.get_world_size() if is_dist else 1
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if is_dist else 0
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
@@ -61,7 +61,8 @@ def ailab_train(cfg):
         if num_classes is not None and criterion.weight.numel() != num_classes:
             import warnings
             warnings.warn(
-                f"Loss weight length {criterion.weight.numel()} != model output classes {num_classes}, removing weight.")
+                f"Loss weight length {criterion.weight.numel()} "\
+                    "!= model output classes {num_classes}, removing weight.")
             criterion.register_buffer('weight', None)
 
     wf = WorkFlow(cfg, model, optimizer, criterion)
@@ -102,6 +103,8 @@ def ailab_train(cfg):
 
     # 启动流程
     wf.run(loaders, cfg['workflow'], cfg['total_epochs'])
+    if is_dist:
+        dist.destroy_process_group()
 
 
 def parse_args():
