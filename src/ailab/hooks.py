@@ -82,14 +82,65 @@ class LoggerHook(Hook):
             log_file = os.path.join(cfg['log_dir'], 'train.log')
         self.logger = get_logger(log_file=log_file)
 
+    def before_run(self, wf):
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        self.logger.info("===== Starting run =====")
+
+    def after_run(self, wf):
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        self.logger.info("===== Run completed =====")
+
+    def before_train_epoch(self, wf):
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        self.logger.info(f"--- Starting train epoch {wf.epoch} ---")
+
+    def after_train_epoch(self, wf):
+        # 仅 rank0 打印
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        # 打印该 epoch 的汇总信息
+        msgs = self._gather_log_info(wf, 'train')
+        self.logger.info("  ".join(msgs))
+
+    def before_val_epoch(self, wf):
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        wf.val_iter = 0
+        self.logger.info(f"--- Starting validation epoch {wf.epoch} ---")
+
+    def after_val_epoch(self, wf):
+        # 仅 rank0 打印
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        # 打印该验证 epoch 的汇总信息
+        msgs = self._gather_log_info(wf, 'val')
+        self.logger.info("  ".join(msgs))
+
+    def before_test_epoch(self, wf):
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        wf.val_iter = 0
+        self.logger.info(f"--- Starting test epoch {wf.epoch} ---")
+
+    def after_test_epoch(self, wf):
+        # 仅 rank0 打印
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+        # 打印该测试 epoch 的汇总信息
+        msgs = self._gather_log_info(wf, 'test')
+        self.logger.info("  ".join(msgs))
+
     def _should_log(self, wf, phase):
+        # 仅 rank0 打印
         if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
             return False
 
         if phase == 'train':
             return (wf.iter + 1) % self.interval == 0
         else:
-            # 验证/测试一般按 batch 0, interval, 2*interval ... 打印
             return (wf.val_iter + 1) % self.interval == 0
 
     def _gather_log_info(self, wf, phase):
@@ -121,7 +172,6 @@ class LoggerHook(Hook):
         if not self._should_log(wf, 'train'):
             return
         msgs = self._gather_log_info(wf, 'train')
-        # print("DEBUG meters:", wf.meters)
         self.logger.info("  ".join(msgs))
 
     def after_val_iter(self, wf):
@@ -143,12 +193,6 @@ class LoggerHook(Hook):
         msgs = self._gather_log_info(wf, 'test')
         self.logger.info("  ".join(msgs))
         wf.val_iter += 1
-
-    def before_val_epoch(self, wf):
-        wf.val_iter = 0
-
-    def before_test_epoch(self, wf):
-        wf.val_iter = 0
 
 
 class CheckpointHook(Hook):

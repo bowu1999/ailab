@@ -44,7 +44,13 @@ def ailab_train(cfg):
     model = build_model(cfg['model'])
     model = model.cuda(local_rank)
     if is_dist:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        model = DDP(
+            model,
+            device_ids = [local_rank],
+            output_device = local_rank,
+            find_unused_parameters = True,
+            static_graph = True
+        )
     optimizer = build_optimizer(cfg['optimizer'], model.parameters())
 
     # criterion
