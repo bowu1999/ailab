@@ -93,6 +93,7 @@ ailab/
   您可以将 `ailab` 作为一个独立的库来使用，无需修改其源码。通过注册您自定义的模型、数据集和损失函数，并编写相应的配置文件，您可以灵活地构建和训练自己的深度学习模型。
 
 以下是一个简洁的教程，指导您如何使用 `ailab` 进行模型训练：
+> 源码仓库中的 example 中是一个简单的使用示例
 
 ---
 
@@ -108,13 +109,15 @@ pip install -e .
 
 ## 创建并注册自定义组件
 
-在一个新的 Python 文件（例如 `my_components.py`）中，定义并注册您的自定义模型、数据集、损失函数等。
+在一个新的 Python 文件（例如 `train.py`）中，定义并注册您的自定义模型、数据集、损失函数等。
 
 
 ```python
-# my_components.py
-
+# train.py
+from ailab import ailab_train
 from ailab.registry import MODELS, DATASETS, LOSSES
+
+from config import cfg
 
 @MODELS.register_module()
 class MyModel(nn.Module):
@@ -148,22 +151,17 @@ class MyLoss(nn.Module):
     def forward(self, output, target):
         # 计算损失
         return loss
+
+if __name__ == '__main__':
+    ailab_train(cfg)
 ```
-
-
-> **注意**：确保在训练前导入此文件，以完成组件的注册。
 
 ## 编写配置文件
 
 创建一个配置文件（例如 `config.py`），指定训练的各项参数。
 
-
 ```python
 # config.py
-
-import my_components  # 导入自定义组件注册模块
-
-
 cfg = dict(
     seed=42,
     work_dir="./work_dir",
@@ -215,10 +213,10 @@ cfg = dict(
 
 ## 启动训练
 
-使用以下命令启动训练：
+使用以下命令启动分布式训练：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 -m ailab.tools.train --config /path/to/config.py
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 train.py
 ```
 
 

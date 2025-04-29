@@ -102,7 +102,8 @@ class LoggerHook(Hook):
             msgs.append(f"Iter[{wf.iter + 1}/{wf.max_iter}]")
             msgs.append(f"Loss: {wf.last_loss:.8f}")
         else:
-            msgs.append(f"ValIter[{wf.val_iter + 1}]")  # 这里只是记录 batch 数
+            msgs.append(f"ValIter[{wf.val_iter + 1}]")
+            msgs.append(f"Loss: {wf.last_loss:.8f}")
 
         # 加上用户自定义 log_items
         for name, handler in self.log_items.items():
