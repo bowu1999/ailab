@@ -19,12 +19,6 @@ Hook 系统：日志、断点续训、学习率调度、指标计算、TensorBoa
 
 断点续训：自动从检查点恢复，并支持动态学习率策略
 
-## 安装
-```bash
-git clone https://github.com/yourusername/ailab.git
-cd ailab
-pip install -r requirements.txt
-```
 依赖：
 ```bash
 Python ≥3.7
