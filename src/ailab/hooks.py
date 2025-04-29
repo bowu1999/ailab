@@ -2,10 +2,9 @@ import os
 import torch
 import torch.distributed as dist
 
-from ailab.builder import build_metrics
+from ailab.builder import build_metrics, build_scheduler
 from .utils.logging import get_logger
 from .utils.checkpoint import Checkpointer
-from .utils.lr_scheduler import build_scheduler
 
 
 class Hook:
@@ -220,13 +219,14 @@ class ResumeHook(Hook):
 
 
 class LrSchedulerHook(Hook):
-    def __init__(self, cfg, optimizer):
+    def __init__(self, cfg, optimizer, total_steps = None):
         # cfg 是 hooks.lr_scheduler 部分，
         # 里面须包含一个子字段 scheduler
         scheduler_cfg = cfg.get('scheduler', {})
+        
         if not scheduler_cfg or 'type' not in scheduler_cfg:
             raise ValueError("`hooks.lr_scheduler.scheduler.type` must be defined")
-        self.scheduler = build_scheduler(scheduler_cfg, optimizer)
+        self.scheduler = build_scheduler(scheduler_cfg, optimizer, total_steps)
 
     def after_train_epoch(self, wf):
         self.scheduler.step()

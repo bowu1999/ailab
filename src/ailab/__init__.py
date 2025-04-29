@@ -5,4 +5,5 @@ from .utils import *
 from .hooks import *
 from .hooks_extra import *
 from .datasets import *
+from .schedulers import *
 from ailab.tools.train import ailab_train

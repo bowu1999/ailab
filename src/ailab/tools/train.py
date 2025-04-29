@@ -3,6 +3,7 @@ import os
 import torch
 import inspect
 import importlib
+from math import ceil
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -73,6 +74,12 @@ def ailab_train(cfg):
 
     wf = WorkFlow(cfg, model, optimizer, criterion)
 
+    dataset_size = len(loaders['train'].dataset)
+    batch_size = cfg.get("data").get("train_dataloader").get("batch_size")
+    num_epochs = cfg.get("total_epochs")
+
+    # 计算 total_steps
+    total_steps = num_epochs * ceil(dataset_size / batch_size / world_size)
     # hooks注册
     hooks = []
     if 'hooks' in cfg:
@@ -101,7 +108,7 @@ def ailab_train(cfg):
             sig = inspect.signature(HookClass.__init__)
             params = [p for p in sig.parameters if p != 'self']
             if 'optimizer' in params:
-                hooks.append(HookClass(hook_cfg, optimizer))
+                hooks.append(HookClass(hook_cfg, optimizer, total_steps))
             else:
                 hooks.append(HookClass(hook_cfg))
 

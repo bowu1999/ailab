@@ -5,13 +5,14 @@ import pkgutil
 import inspect
 import importlib
 import torch.nn as nn
+from torch import distributed as dist
 from torch.nn.modules.loss import _Loss
+from torch.optim import lr_scheduler as _torch_schedulers
 
 # ---------------------------------------------------
 # Allow running without installation by adding src to PYTHONPATH
 # ---------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# project root: three levels up from src/ailab/
 project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
 src_dir = os.path.join(project_root, 'src')
 if src_dir not in sys.path:
@@ -29,7 +30,9 @@ class Registry:
             return lambda x: self.register_module(x, name=name)
         mod_name = name or module.__name__
         if mod_name in self._module_dict:
-            raise KeyError(f"'{mod_name}' is already registered")
+            # raise KeyError(f"'{mod_name}' is already registered")
+            if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+                print(f"'{mod_name}' is already registered, raw '{mod_name}' will be cover")
         self._module_dict[mod_name] = module
         return module
 
@@ -86,12 +89,37 @@ def auto_import_and_register_packages(package_path, package_name, registry):
                 except Exception as e:
                     print(f"Warning: {obj_name} cannot be registered: {e}")
 
+
+# -----------------------
+# 自动注册 torchvision.datasets 中的所有 Dataset 子类
+# -----------------------
+try:
+    import torchvision.datasets as tv_datasets
+    from torch.utils.data import Dataset as _TorchDataset
+    for name, obj in inspect.getmembers(tv_datasets):
+        if inspect.isclass(obj) and issubclass(obj, _TorchDataset):
+            DATASETS.register_module(obj, name=name)
+except ImportError:
+    pass
+
 # -----------------------
 # 自动递归导入&注册 datasets
 # -----------------------
 _datasets_pkg = os.path.abspath(os.path.join(current_dir, 'datasets'))
 if os.path.isdir(_datasets_pkg):
     auto_import_and_register_packages(_datasets_pkg, 'ailab.datasets', DATASETS)
+
+
+# -----------------------
+# 自动注册 torchvision.models 中的所有模型构建函数/类
+# -----------------------
+try:
+    import torchvision.models as tv_models
+    for name, obj in inspect.getmembers(tv_models):
+        if inspect.isclass(obj) or inspect.isfunction(obj):
+            MODELS.register_module(obj, name=name)
+except ImportError:
+    pass
 
 # -----------------------
 # 自动递归导入&注册 models
@@ -100,7 +128,10 @@ _models_pkg = os.path.abspath(os.path.join(current_dir, 'models'))
 if os.path.isdir(_models_pkg):
     auto_import_and_register_packages(_models_pkg, 'ailab.models', MODELS)
 
+
+# -----------------------
 # 注册 PyTorch 内置 optimizers
+# -----------------------
 import torch.optim as optim
 for name in dir(optim):
     opt = getattr(optim, name)
@@ -117,12 +148,40 @@ _optim_pkg = os.path.abspath(os.path.join(current_dir, 'optimizers'))
 if os.path.isdir(_optim_pkg):
     auto_import_and_register_packages(_optim_pkg, 'ailab.optimizers', OPTIMIZERS)
 
+
+# -----------------------
+# 注册 PyTorch.optim.lr_scheduler 内置全部调度器
+# -----------------------
+for name, obj in inspect.getmembers(_torch_schedulers):
+    if inspect.isclass(obj):
+        try:
+            LR_SCHEDULERS.register_module(obj, name=name)
+        except Exception:
+            pass
+
 # -----------------------
 # 自动递归导入&注册 lr_schedulers
 # -----------------------
-_schedulers_pkg = os.path.abspath(os.path.join(current_dir, 'lr_scheduler' if False else 'schedulers'))
+_schedulers_pkg = os.path.abspath(os.path.join(current_dir, 'schedulers'))
 if os.path.isdir(_schedulers_pkg):
     auto_import_and_register_packages(_schedulers_pkg, 'ailab.schedulers', LR_SCHEDULERS)
+
+
+# -----------------------
+# 自动注册 torchmetrics 库中的所有 Metric 类
+# -----------------------
+try:
+    import torchmetrics
+    for module_info in pkgutil.walk_packages(torchmetrics.__path__, torchmetrics.__name__ + '.'):
+        module = importlib.import_module(module_info.name)
+        for name, obj in inspect.getmembers(module):
+            if inspect.isclass(obj):
+                try:
+                    METRICS.register_module(obj, name=name)
+                except Exception:
+                    pass
+except ImportError:
+    pass
 
 # -----------------------
 # 自动递归导入&注册 metrics
@@ -130,6 +189,7 @@ if os.path.isdir(_schedulers_pkg):
 _metrics_pkg = os.path.abspath(os.path.join(current_dir, 'metrics'))
 if os.path.isdir(_metrics_pkg):
     auto_import_and_register_packages(_metrics_pkg, 'ailab.metrics', METRICS)
+
 
 # -----------------------
 # 注册 PyTorch 内置 losses

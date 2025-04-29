@@ -1,7 +1,7 @@
 import torch
 from torch import distributed as dist
 
-from .registry import DATASETS, MODELS, OPTIMIZERS, METRICS, LOSSES
+from .registry import DATASETS, MODELS, OPTIMIZERS, METRICS, LOSSES, LR_SCHEDULERS
 
 
 # Builder utilities
@@ -60,3 +60,12 @@ def build_loss(cfg):
     if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
         print(f"Building loss: {loss_fun.__class__.__name__}")
     return loss_fun
+
+
+def build_scheduler(cfg: dict, optimizer, total_steps = None):
+    """Build loss function from config dict, converting list weights to tensor."""
+    cfg = cfg.copy()
+    lr_scheduler = LR_SCHEDULERS.build(cfg, default_args = {'optimizer': optimizer, 'total_steps': total_steps})
+    if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+        print(f"Building lr_scheduler: {lr_scheduler.__class__.__name__}")
+    return lr_scheduler
