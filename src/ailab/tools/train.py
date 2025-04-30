@@ -16,7 +16,7 @@ from ailab.builder import build_dataset, build_model, build_optimizer, build_los
 
 def ailab_train(cfg):
     """基于配置文件的训练接口。"""
-    os.makedirs(cfg['work_dir'], exist_ok=True)
+    os.makedirs(cfg['work_dir'], exist_ok = True)
 
     # 初始化分布式环境（返回是否分布式训练）
     is_dist = init_dist(cfg)
@@ -86,7 +86,6 @@ def ailab_train(cfg):
         if 'metrics' in cfg['hooks'] and cfg['hooks']['metrics'].get('enable', True):
             from ailab.hooks import MetricHook
             hooks.append(MetricHook(cfg['hooks']['metrics']))
-
         for name, hook_cfg in cfg['hooks'].items():
             if name == 'metrics' or not hook_cfg.get('enable', True):
                 continue
@@ -96,7 +95,6 @@ def ailab_train(cfg):
             except (ImportError, AttributeError):
                 module = importlib.import_module('ailab.hooks_extra')
                 HookClass = getattr(module, hook_cfg['type'])
-
             if hook_cfg['type'] == 'DDPHook':
                 hooks.append(HookClass())
                 continue
@@ -104,7 +102,6 @@ def ailab_train(cfg):
                 hook_cfg['work_dir'] = cfg['work_dir']
                 hooks.append(HookClass(hook_cfg))
                 continue
-
             sig = inspect.signature(HookClass.__init__)
             params = [p for p in sig.parameters if p != 'self']
             if 'optimizer' in params:

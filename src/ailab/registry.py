@@ -5,6 +5,7 @@ import pkgutil
 import inspect
 import importlib
 import torch.nn as nn
+from inspect import signature
 from torch import distributed as dist
 from torch.nn.modules.loss import _Loss
 from torch.optim import lr_scheduler as _torch_schedulers
@@ -53,7 +54,10 @@ class Registry:
         if default_args:
             for n, v in default_args.items():
                 args.setdefault(n, v)
-        return obj_cls(**args)
+        sig = signature(obj_cls)
+        params = sig.parameters
+        filtered_kwargs = {k: args[k] for k in params.keys() if k in args}
+        return obj_cls(**filtered_kwargs)
 
 # Create global registries
 DATASETS      = Registry()
