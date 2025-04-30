@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 
-class BasicBlock(nn.Module):
+class _BasicBlock(nn.Module):
     expansion: int = 1
 
     def __init__(
@@ -15,7 +15,7 @@ class BasicBlock(nn.Module):
         norm_layer: nn.Module = nn.BatchNorm2d,
         act_layer: nn.Module = nn.ReLU
     ) -> None:
-        super(BasicBlock, self).__init__()
+        super(_BasicBlock, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn1 = norm_layer(planes)
         self.act = act_layer(inplace=True)
@@ -43,7 +43,7 @@ class BasicBlock(nn.Module):
         return out
 
 
-class Bottleneck(nn.Module):
+class _Bottleneck(nn.Module):
     expansion: int = 4
 
     def __init__(
@@ -55,7 +55,7 @@ class Bottleneck(nn.Module):
         norm_layer: nn.Module = nn.BatchNorm2d,
         act_layer: nn.Module = nn.ReLU
     ) -> None:
-        super(Bottleneck, self).__init__()
+        super(_Bottleneck, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = norm_layer(planes)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -89,7 +89,7 @@ class Bottleneck(nn.Module):
         return out
 
 
-class ResNet(nn.Module):
+class LabResNet(nn.Module):
     def __init__(
         self,
         block: nn.Module,
@@ -101,7 +101,7 @@ class ResNet(nn.Module):
         stem_type: str = '7x7',  # '7x7' or '3x3'
         deep_stem: bool = False
     ) -> None:
-        super(ResNet, self).__init__()
+        super(LabResNet, self).__init__()
         self.inplanes = 64
         self.norm_layer = norm_layer
         self.act_layer = act_layer
@@ -179,17 +179,17 @@ class ResNet(nn.Module):
         return x
 
 
-def resnet18(**kwargs):
-    return ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+def labresnet18(**kwargs):
+    return LabResNet(_BasicBlock, [2, 2, 2, 2], **kwargs)
 
-def resnet34(**kwargs):
-    return ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+def labresnet34(**kwargs):
+    return LabResNet(_BasicBlock, [3, 4, 6, 3], **kwargs)
 
-def resnet50(**kwargs):
-    return ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+def labresnet50(**kwargs):
+    return LabResNet(_Bottleneck, [3, 4, 6, 3], **kwargs)
 
-def resnet101(**kwargs):
-    return ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
+def labresnet101(**kwargs):
+    return LabResNet(_Bottleneck, [3, 4, 23, 3], **kwargs)
 
-def resnet152(**kwargs):
-    return ResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
+def labresnet152(**kwargs):
+    return LabResNet(_Bottleneck, [3, 8, 36, 3], **kwargs)
