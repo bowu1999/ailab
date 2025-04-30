@@ -2,12 +2,12 @@
 深度学习模型训练流
 
 ## 概览
-本仓库实现了一个轻量级的、借鉴 OpenMMLab 设计思路的深度学习框架（ailab），支持从数据集注册、模型构建，到训练（含 DDP 与 AMP）、日志记录（控制台、TensorBoard、Weights & Biases）、断点续训、评价指标、推理部署的全流程。用户只需编辑一个 YAML 配置文件，训练和推理脚本即可自动加载所有组件。
+本仓库实现了一个轻量级的深度学习框架（ailab），支持从数据集注册、模型构建，到训练（含 DDP 与 AMP）、日志记录（控制台、TensorBoard、Weights & Biases）、断点续训、评价指标、推理部署(敬请期待)的全流程。用户只需编辑一个 py 配置文件，训练和推理脚本即可自动加载所有组件。
 
 ## 特性
 模块化注册表：统一管理数据集、模型、优化器和指标
 
-配置驱动：一个 YAML 文件定义数据、模型、优化器、Hook、训练流程与分布式设置
+配置驱动：一个 py 文件定义数据、模型、优化器、Hook、训练流程与分布式设置
 
 分布式训练：基于 NCCL 后端的 DDP，一键设置 torch.cuda.set_device 并在 barrier() 中指定 device_ids
 
@@ -35,7 +35,7 @@ wandb、tensorboard
 ```bash
 ailab/
 ├── configs/
-│   └── train.yaml              # 全流程配置：支持分布式、AMP、日志等
+│   └── train.py                    # 全流程配置：支持分布式、AMP、日志等
 ├── src/ailab
 |   │   ├── registry.py             # Registry 与模块注册
 |   │   ├── builder.py              # 构建器：datasets/models/optimizers
@@ -62,7 +62,7 @@ ailab/
 |   │   │   ├── __init__.py             # models 包
 |   │   │   └── base                    # 模型基类
 |   │   │   │   ├── __init__.py         # base 包
-|   │   │   │   └── resnet.py          # ResNet 模版
+|   │   │   │   └── resnet.py           # ResNet 模版
 |   │   │   │   └── **.py               # 各种模型接口
 |   │   │   └── resnet50.py             # 用户自定义 ResNet50
 |   │   │── metrics/
@@ -84,14 +84,14 @@ ailab/
 └── requirements.txt            # 依赖：torch, torchvision, mpi4py, wandb, tensorboard
 ```
 ## 快速开始
-  您可以将 `ailab` 作为一个独立的库来使用，无需修改其源码。通过注册您自定义的模型、数据集和损失函数，并编写相应的配置文件，您可以灵活地构建和训练自己的深度学习模型。
+可以将 `ailab` 作为一个独立的库来使用，无需修改其源码。通过注册自定义的模型、数据集和损失函数，并编写相应的配置文件，可以灵活地构建和训练深度学习模型。
 
-以下是一个简洁的教程，指导您如何使用 `ailab` 进行模型训练：
+以下是一个简洁的教程，说明如何使用 `ailab` 进行模型训练：
 > 源码仓库中的 example 中是一个简单的使用示例
 
 ---
 
-## 源码安装 AILab
+### 源码安装 AILab
 
 将 `ailab` 源码克隆到本地，并安装依赖：
 
@@ -101,9 +101,9 @@ cd ailab
 pip install -e .
 ```
 
-## 创建并注册自定义组件
+### 创建并注册自定义组件
 
-在一个新的 Python 文件（例如 `train.py`）中，定义并注册您的自定义模型、数据集、损失函数等。
+在一个新的 Python 文件（例如 `train.py`）中，定义并注册自定义模型、数据集、损失函数等。
 
 
 ```python
@@ -214,11 +214,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 tra
 ```
 
 
-确保在配置文件中设置了正确的分布式训练参数，并根据您的硬件环境调整相关设置。
+确保在配置文件中设置了正确的分布式训练参数，并根据硬件环境调整相关设置。
 
 ---
 
-通过上述步骤，您可以灵活地使用 AILab 进行自定义模型的训练，而无需修改其源码。
+通过上述步骤，以灵活地使用 AILab 进行自定义模型的训练，而无需修改其源码。
 
 查看日志：
 
