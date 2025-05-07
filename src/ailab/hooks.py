@@ -211,7 +211,7 @@ class CheckpointHook(Hook):
 
 class ResumeHook(Hook):
     def __init__(self, cfg): 
-        self.resume_path = cfg.get('resume_from')
+        self.resume_path = cfg.get('resume_from', None)
 
     def before_run(self, wf):
         if self.resume_path:
@@ -293,7 +293,14 @@ class MetricHook(Hook):
         device = next(wf.model.parameters()).device
         # 把所有 metric 的内部状态移动到同一个设备
         for m in wf.metrics.values():
-            m.to(device)
+            # 只有 torchmetrics.Metric 或继承自 nn.Module 的才调用 .to()
+            if hasattr(m, 'to') and callable(m.to):
+                try:
+                    m.to(device)
+                except Exception:
+                    # 万一其它指标有 to() 但不支持也不阻塞
+                    pass
+
 
     def _reset(self, wf, phase):
         # 重置并仅保留本阶段指标

@@ -100,7 +100,6 @@ cfg = dict(
     # 核心流程：train → val
     workflow = [{"phase":"train"},{"phase":"val"}],
     total_epochs = 50,
-
     data = dict(
         train = dict(type="MyDataset", data_path="train.pkl"),
         val   = dict(type="MyDataset", data_path="val.pkl"),

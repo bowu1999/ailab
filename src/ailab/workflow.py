@@ -185,6 +185,9 @@ class WorkFlow:
                 # 让 _call_model 同时返回 outputs 和 GPU 上的 data
                 outputs, data = self._call_model(cpu_batch)
                 # 计算 Loss：全部从 data（GPU 上）读取
+                for k, v in data.items():
+                    if torch.is_tensor(v) and v.dtype == torch.float64:
+                        data[k] = v.float()
                 loss = call_fn(self.criterion, data, mapping = self.cfg['loss'].get('mapping', {}))
                 self.last_loss = loss.item() if hasattr(loss, 'item') else loss
                 # 反向 & 优化
@@ -192,7 +195,7 @@ class WorkFlow:
                 loss.backward()
                 self.optimizer.step()
                 # 样本统计
-                bs = get_batch_size(data.get('target', outputs))
+                bs = get_batch_size(self.last_data)
                 samples += bs * world_size
                 if is_main:
                     pbar.set_postfix({'Samples': samples})
@@ -218,12 +221,17 @@ class WorkFlow:
                     batch = next(data_iter, None)
                     if batch is None:
                         break
-                    outputs = self._call_model(batch)
-
+                    outputs, data = self._call_model(batch)
+                    loss = call_fn(
+                        self.criterion,
+                        data,
+                        mapping = self.cfg.get('loss', {}).get('mapping', {})
+                    )
+                    # 记录到 last_loss，供 LoggerHook 打印
+                    self.last_loss = loss.item() if hasattr(loss, 'item') else loss
                     # 触发 after_val_iter 钩子，MetricHook 会在此更新指标
                     self.call_hook('after_val_iter')
-
-                    bs = get_batch_size(batch.get('target', outputs))
+                    bs = get_batch_size(self.last_data)
                     samples += bs * world_size
                     if is_main:
                         pbar.set_postfix({'Samples': samples})
@@ -247,10 +255,9 @@ class WorkFlow:
                     batch = next(data_iter, None)
                     if batch is None:
                         break
-                    outputs = self._call_model(batch)
+                    outputs, data = self._call_model(batch)
                     self.call_hook('after_test_iter')
-
-                    bs = get_batch_size(batch.get('target', outputs))
+                    bs = get_batch_size(self.last_data)
                     samples += bs * world_size
                     if is_main:
                         pbar.set_postfix({'Samples': samples})
