@@ -6,6 +6,7 @@ from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 from abc import ABC, abstractmethod
 from torch.utils.data import Dataset
+from typing import List, Tuple, Union
 
 
 class LabBaseDataset(Dataset, ABC):
@@ -52,7 +53,7 @@ class FileAnnotationDataset(LabBaseDataset):
     单文件存储标注，如 CSV、TXT、JSON 列表等。
     load_fun 返回行列表或 DataFrame。
     """
-    def __init__(self, annotation_file: str, load_fun):
+    def __init__(self, annotation_file: Union[str, Path, List[str]], load_fun):
         if isinstance(annotation_file, (str, Path)):
             annotation_paths = [annotation_file]
         else:
