@@ -171,7 +171,7 @@ class WorkFlow:
         self.model.train()
         world_size = self._get_world_size()
         total_iters = iters or len(loader)
-        self.max_iter = total_iters
+        self.max_iter = total_iters * self.cfg.get("total_epochs")
         is_main = (int(os.environ.get('LOCAL_RANK', 0)) == 0)
         pbar = tqdm(total=total_iters, desc=f'Train {self.epoch}', disable=not is_main, leave=False)
         samples = 0
