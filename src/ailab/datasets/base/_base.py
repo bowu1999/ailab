@@ -53,8 +53,10 @@ class FileAnnotationDataset(LabBaseDataset):
     load_fun 返回行列表或 DataFrame。
     """
     def __init__(self, annotation_file: str, load_fun):
-        if isinstance(annotation_file, str):
+        if isinstance(annotation_file, (str, Path)):
             annotation_paths = [annotation_file]
+        else:
+            annotation_paths = annotation_file
         self.samples = []
         for annotation_file in annotation_paths:
             self.samples += load_fun(annotation_file)
