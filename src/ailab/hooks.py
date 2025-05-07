@@ -5,6 +5,7 @@ import torch.distributed as dist
 from ailab.builder import build_metrics, build_scheduler
 from .utils.logging import get_logger
 from .utils.checkpoint import Checkpointer
+from .utils.call_fn import call_fn
 
 
 class Hook:
@@ -264,73 +265,63 @@ class AMPHook(Hook):
     
 
 class MetricHook(Hook):
-    """
-    通用的 Metric 收集 Hook，会在 train/val/test 阶段：
-      - before_run：根据配置动态构建并挂载 wf.metrics 与 wf.metric_results
-      - before_{phase}_epoch: reset 所有指标
-      - after_{phase}_iter : update(outputs, targets)
-      - after_{phase}_epoch: compute 并写到 wf.metric_results["{phase}_{name}"]
-    配置示例（hooks.metrics 段）：
-      metrics:
-        top1:
-          type: "Accuracy"
-          topk: 1
-        top5:
-          type: "Accuracy"
-          topk: 5
-    """
     def __init__(self, cfg):
         super().__init__()
-        # 从 hook 配置里拿到所有 metric 定义，排除 type 字段
-        self.metric_cfg = {k: v for k, v in cfg.items() if k != 'type'}
-        # 构建模式集合，默认支持 train/val/test
-        self.modes = {'train', 'val', 'test'}
+        # 读取所有配置，确保每个都含 phases、mapping
+        self.metric_cfg = {}
+        for name, spec in cfg.items():
+            if name == 'type': 
+                continue
+            s = spec.copy()
+            s.setdefault('phases', ['val', 'test'])  # 默认只在 val/test
+            self.metric_cfg[name] = s
 
     def before_run(self, wf):
-        # 构建 metric 实例
-        wf.metrics = build_metrics(self.metric_cfg)
+        # 构建所有 metric 实例（去掉 mapping/phases）
+        spec_for_build = {
+            n: {k: v for k, v in s.items() if k not in ('mapping', 'phases')}
+            for n, s in self.metric_cfg.items()
+        }
+        wf.metrics = build_metrics(spec_for_build)
         wf.metric_results = {}
-        # **新增**：每个阶段的 running meters，用于 LoggerHook 读 current avg
-        wf.meters = {name: m for name, m in wf.metrics.items()}
-
-    def _in_mode(self, phase):
-        return phase in self.modes
-
-    def _reset(self, wf):
+        # 初始 meters 也挂所有（会在各阶段前重置）
+        wf.meters = {}
+        for name, m in wf.metrics.items():
+            m._mapping = self.metric_cfg[name]['mapping']
+            m._phases  = self.metric_cfg[name]['phases']
+            wf.meters[name] = m
+        device = next(wf.model.parameters()).device
+        # 把所有 metric 的内部状态移动到同一个设备
         for m in wf.metrics.values():
-            m.reset()
-        # 重置 meters
-        for name, m in wf.metrics.items():
-            wf.meters[name] = m
+            m.to(device)
 
-    def _update(self, wf):
-        # 更新 metric 实例
+    def _reset(self, wf, phase):
+        # 重置并仅保留本阶段指标
+        new_meters = {}
         for name, m in wf.metrics.items():
-            m.update(wf.last_outputs, wf.last_targets)
-            # **同步到 wf.meters**
-            wf.meters[name] = m
+            if phase in m._phases:
+                m.reset()
+                new_meters[name] = m
+        wf.meters = new_meters
+
+    def _update(self, wf, phase):
+        data = wf.last_data
+        for name, m in wf.meters.items():  # 只对当前 meters 更新
+            call_fn(m.update, data, mapping=m._mapping)
 
     def _compute(self, wf, phase):
-        for name, m in wf.metrics.items():
+        for name, m in wf.meters.items():
             wf.metric_results[f"{phase}_{name}"] = m.compute()
 
-    def before_train_epoch(self, wf):
-        self._reset(wf)
-    def after_train_iter(self, wf):
-        self._update(wf)
-    def after_train_epoch(self, wf):
-        self._compute(wf, 'train')
+    # 在不同阶段绑定 reset/update/compute
+    def before_train_epoch(self, wf): self._reset(wf, 'train')
+    def after_train_iter(self,   wf): self._update(wf, 'train')
+    def after_train_epoch(self,   wf): self._compute(wf, 'train')
 
-    def before_val_epoch(self, wf):
-        self._reset(wf)
-    def after_val_iter(self, wf):
-        self._update(wf)
-    def after_val_epoch(self, wf):
-        self._compute(wf, 'val')
+    def before_val_epoch(self,   wf): self._reset(wf, 'val')
+    def after_val_iter(self,     wf): self._update(wf, 'val')
+    def after_val_epoch(self,    wf): self._compute(wf, 'val')
 
-    def before_test_epoch(self, wf):
-        self._reset(wf)
-    def after_test_iter(self, wf):
-        self._update(wf)
-    def after_test_epoch(self, wf):
-        self._compute(wf, 'test')
+    def before_test_epoch(self,  wf): self._reset(wf, 'test')
+    def after_test_iter(self,    wf): self._update(wf, 'test')
+    def after_test_epoch(self,   wf): self._compute(wf, 'test')

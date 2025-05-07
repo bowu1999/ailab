@@ -1,36 +1,181 @@
-# ailab
-深度学习模型训练流
+## 概述
 
-## 概览
-本仓库实现了一个轻量级的深度学习框架（ailab），支持从数据集注册、模型构建，到训练（含 DDP 与 AMP）、日志记录（控制台、TensorBoard、Weights & Biases）、断点续训、评价指标、推理部署(敬请期待)的全流程。用户只需编辑一个 py 配置文件，训练和推理脚本即可自动加载所有组件。
+AILab 是一个轻量级、配置驱动的深度学习训练框架，覆盖从数据集注册、模型构建，到分布式训练（DDP + NCCL）、混合精度（AMP）、日志（Console/TensorBoard/W&B）、断点续训、指标计算，以及推理部署的全流程。  
+用户只需编写一个 Python 配置文件，即可对接自定义的数据集、模型与损失函数，无需改动框架源码。
 
-## 特性
-模块化注册表：统一管理数据集、模型、优化器和指标
+---
 
-配置驱动：一个 py 文件定义数据、模型、优化器、Hook、训练流程与分布式设置
+## 核心特性
 
-分布式训练：基于 NCCL 后端的 DDP，一键设置 torch.cuda.set_device 并在 barrier() 中指定 device_ids
+### 1. 模块化注册表  
+- **Registry 机制**：统一管理数据集（`DATASETS`）、模型（`MODELS`）、损失（`LOSSES`）、指标（`METRICS`）、Hook（`HOOKS`）等组件。  
+- **插件式扩展**：用户在任意位置定义新类，只需 `@XXX.register_module()` 一行即可纳入调度。
 
-混合精度：可选 AMP（自动混合精度）支持
+### 2. 配置驱动  
+- **单一 Python 配置**：所有超参、路径、流程、钩子、分布式设置都写在一个 `cfg` 字典里。  
+- **动态绑定**：`call_fn` 根据 `mapping` 自动将数据字典中的字段，映射到模型、Loss、Metric 的方法参数。
 
-Hook 系统：日志、断点续训、学习率调度、指标计算、TensorBoard & W&B 集成
+### 3. 分布式训练  
+- 基于 NCCL 后端的 `torch.nn.parallel.DistributedDataParallel`（支持多机多卡）。  
+- `torchrun` 一行命令启动，全局环境变量自动注入 `RANK`、`WORLD_SIZE`、`MASTER_ADDR/PORT`。
 
-进度条和样本计数：使用 tqdm（仅 Rank 0 显示）
+### 4. 混合精度加速  
+- **AMP Hook**：可选开启，训练与验证自动在半精度下加速，保持数值稳定。
 
-断点续训：自动从检查点恢复，并支持动态学习率策略
+### 5. 灵活的 Hook 系统  
+- **MetricHook**：支持多指标、阶段过滤（如仅在验证阶段计算 PSNR），并自动与 Logger/TensorBoard/W&B 集成。  
+- **LoggerHook**：周期性输出训练状态、样本数和指标平均值。  
+- **CheckpointHook / ResumeHook**：自动保存与恢复模型权重与训练状态。  
+- **LrSchedulerHook**：集成多种调度器（CosineAnnealing、Warmup+Cosine 等）。  
+- **DDPHook**：分布式 Barrier 与梯度同步优化。  
+- **TensorboardHook & WandbHook**：一键接入可视化平台。
 
-依赖：
+### 6. 鲁棒的数据管道  
+- **统一抽象基类** (`LabBaseDataset`)：支持多种存储方式（单文件、文件夹分类、CSV/Excel、COCO/VOC 等）与子任务抽象（分类、回归、检测、分割、时序、音频、文本等）。  
+- **自动容错**：全局打开 PIL 截断图像容错，`__getitem__` 捕获并跳过坏样本，保证 DataLoader 不因单张损坏文件卡死。  
+- **tuple/dict 双兼容**：Dataset 可返回 `(inputs, targets)` 或 `{'input':…, 'target':…, …}`，Workflow 会自动包装 tuple→dict。
+
+---
+
+## 快速开始
+
+### 1. 安装
+
 ```bash
-Python ≥3.7
-
-PyTorch ≥1.9（含 CUDA）
-
-torchvision
-
-mpi4py（用于分布式启动）
-
-wandb、tensorboard
+git clone https://github.com/bowu1999/ailab.git
+cd ailab
+pip install -e .
 ```
+
+### 2. 编写自定义组件
+
+在 `train.py` 中注册：
+
+```python
+import torch.nn as nn
+from torch.utils.data import Dataset
+from ailab import ailab_train
+from ailab.registry import MODELS, DATASETS, LOSSES
+
+@MODELS.register_module()
+class MyModel(nn.Module):
+    def __init__(self, in_feats, out_feats):
+        super().__init__()
+        self.linear = nn.Linear(in_feats, out_feats)
+    def forward(self, input):
+        return self.linear(input)
+
+@DATASETS.register_module()
+class MyDataset(Dataset):
+    def __init__(self, data_path):
+        self.data = load_data(data_path)  # 任意加载方式
+    def __len__(self):
+        return len(self.data)
+    def __getitem__(self, idx):
+        x, y = self.data[idx]
+        return x, y  # 支持 tuple，框架会自动包装
+
+@LOSSES.register_module()
+class MyLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mse = nn.MSELoss()
+    def forward(self, output, target):
+        return self.mse(output, target)
+
+if __name__ == "__main__":
+    from config import cfg
+    ailab_train(cfg)
+```
+
+### 3. 编写配置文件 `config.py`
+
+```python
+cfg = dict(
+    seed = 42,
+    work_dir = "./work_dir",
+    dist = dict(backend="nccl", init_method="env://"),
+    # 核心流程：train → val
+    workflow = [{"phase":"train"},{"phase":"val"}],
+    total_epochs = 50,
+
+    data = dict(
+        train = dict(type="MyDataset", data_path="train.pkl"),
+        val   = dict(type="MyDataset", data_path="val.pkl"),
+        train_dataloader = dict(batch_size=32, num_workers=4, pin_memory=True),
+        val_dataloader   = dict(batch_size=64, num_workers=2),
+    ),
+
+    model = dict(
+        type        = "MyModel",
+        in_feats    = 128,
+        out_feats   = 10,
+        mapping     = {"input":"input"},   # forward(input=…)
+        output_keys = ["output"],          # output Tensor 命名为 'output'
+    ),
+
+    loss = dict(
+        type    = "MyLoss",
+        mapping = {"output":"output", "target":"target"}
+    ),
+
+    optimizer = dict(type="AdamW", lr=1e-3, weight_decay=0.01),
+
+    hooks = dict(
+        metrics = dict(
+            type = "MetricHook",
+            top1 = dict(
+                type    = "Top1Accuracy",
+                mapping = {"pred":"output", "label":"target"},
+                phases  = ["train","val"]
+            ),
+        ),
+        logger = dict(
+            type      = "LoggerHook",
+            interval  = 100,
+            log_dir   = "./work_dir/logs",
+            log_items = dict(
+                lr   = "optimizer.param_groups.0.lr",
+                top1 = "meters['top1'].avg"
+            )
+        ),
+        checkpoint  = dict(type="CheckpointHook", interval=1),
+        resume      = dict(type="ResumeHook"),
+        lr_scheduler= dict(type="LrSchedulerHook", scheduler=dict(type="CosineAnnealingLR", T_max=10)),
+        ddp         = dict(type="DDPHook"),
+        amp         = dict(type="AMPHook"),
+        tensorboard = dict(type="TensorboardHook"),
+        wandb       = dict(type="WandbHook", init_args=dict(project="my_proj", name="exp1")),
+    )
+)
+```
+
+---
+
+## 关键点与提示
+
+1. **映射 (`mapping`)**  
+   - `cfg.model.mapping`：模型 `forward` 需要哪些字段映射到输入字典。  
+   - `cfg.loss.mapping`、`cfg.hooks.metrics.*.mapping`：Loss/Metric 方法参数 → 数据字典字段。
+
+2. **多输出**  
+   - `output_keys` 定义模型返回 tuple 时各部分的命名。单输出可省略，框架默认 `["output"]`。
+
+3. **阶段过滤**  
+   - `phases` 字段控制 Metric 只在指定阶段生效（如只在验证时计算 PSNR）。
+
+4. **自动容错**  
+   - 坏文件会被跳过并打印警告；Pillow 截断图像容错已全局开启。
+
+5. **tuple/dict 通用**  
+   - Dataset 返回 `(x,y)` 或 `{'input':x,'target':y,'mask':...}` 均可，框架自动统一到 dict 处理。
+
+6. **分布式与设备**  
+   - Model、Loss、Metric 会自动 `.to(device)`；NCCL 后端下所有张量同步均在 GPU 上完成。
+
+---
+
+通过上述说明，你可以快速上手 AILab，利用其高度模块化与配置驱动的设计，以最小改动实现复杂任务的训练与评估。
 ## 项目结构
 ```bash
 ailab/
@@ -83,291 +228,3 @@ ailab/
 │   |   |   └── infer.py                # 推理脚本
 └── requirements.txt            # 依赖：torch, torchvision, mpi4py, wandb, tensorboard
 ```
-## 快速开始
-可以将 `ailab` 作为一个独立的库来使用，无需修改其源码。通过注册自定义的模型、数据集和损失函数，并编写相应的配置文件，可以灵活地构建和训练深度学习模型。
-
-以下是一个简洁的教程，说明如何使用 `ailab` 进行模型训练：
-> 源码仓库中的 example 中是一个简单的使用示例
-
----
-
-### 源码安装 AILab
-
-将 `ailab` 源码克隆到本地，并安装依赖：
-
-```bash
-git clone https://github.com/bowu1999/ailab.git
-cd ailab
-pip install -e .
-```
-
-### 创建并注册自定义组件
-
-在一个新的 Python 文件（例如 `train.py`）中，定义并注册自定义模型、数据集、损失函数等。
-
-
-```python
-# train.py
-from ailab import ailab_train
-from ailab.registry import MODELS, DATASETS, LOSSES
-
-from config import cfg
-
-@MODELS.register_module()
-class MyModel(nn.Module):
-    def __init__(self, ...):
-        super().__init__()
-        # 初始化模型
-
-    def forward(self, x):
-        # 定义前向传播
-        return x
-
-@DATASETS.register_module()
-class MyDataset(Dataset):
-    def __init__(self, ...):
-        # 初始化数据集
-
-    def __getitem__(self, idx):
-        # 获取数据项
-        return data
-
-    def __len__(self):
-        # 返回数据集大小
-        return size
-
-@LOSSES.register_module()
-class MyLoss(nn.Module):
-    def __init__(self, ...):
-        super().__init__()
-        # 初始化损失函数
-
-    def forward(self, output, target):
-        # 计算损失
-        return loss
-
-if __name__ == '__main__':
-    ailab_train(cfg)
-```
-
-## 编写配置文件
-
-创建一个配置文件（例如 `config.py`），指定训练的各项参数。
-
-```python
-# config.py
-cfg = dict(
-    seed=42,
-    work_dir="./work_dir",
-    dist=dict(
-        backend="nccl",
-        init_method="env://",
-    ),
-    model=dict(
-        type="MyModel",
-        # 其他模型参数
-    ),
-    data=dict(
-        train=dict(
-            type="MyDataset",
-            # 其他数据集参数
-        ),
-        val=dict(
-            type="MyDataset",
-            # 其他数据集参数
-        ),
-        train_dataloader=dict(
-            batch_size=32,
-            num_workers=4,
-        ),
-        val_dataloader=dict(
-            batch_size=32,
-            num_workers=4,
-        ),
-    ),
-    loss=dict(
-        type="MyLoss",
-        # 其他损失函数参数
-    ),
-    optimizer=dict(
-        type="Adam",
-        lr=0.001,
-    ),
-    total_epochs=100,
-    hooks=dict(
-        logger=dict(
-            type="LoggerHook",
-            interval=10,
-            log_dir="./logs",
-        ),
-    ),
-)
-```
-
-
-## 启动训练
-
-使用以下命令启动分布式训练：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 train.py
-```
-
-
-确保在配置文件中设置了正确的分布式训练参数，并根据硬件环境调整相关设置。
-
----
-
-通过上述步骤，以灵活地使用 AILab 进行自定义模型的训练，而无需修改其源码。
-
-查看日志：
-
-控制台：Rank 0 打印进度、Loss、指标
-
-TensorBoard：日志保存在 <work_dir>/tf_logs
-
-W&B（如启用）：在线 Dashboard
-
-断点续训：在配置文件中设置 resume_from 或自动从最新检查点恢复
-
-
-# 配置文件结构（configs/train.py）
-
-配置文件 `config.py` 以字典格式定义，主要包含以下部分：
-
-### 【基础配置】
-
-| 参数 | 说明 |
-|:----|:----|
-| `seed` | 随机种子，保证结果可复现 |
-| `work_dir` | 工作目录，用于保存日志、模型权重等 |
-| `resume_from` | （可选）从某个 checkpoint 恢复训练 |
-
----
-
-### 【分布式训练设置】
-
-| 参数 | 说明 |
-|:----|:----|
-| `dist.backend` | 通常设为 `"nccl"`（NVIDIA GPU 通讯） |
-| `dist.init_method` | 初始化方式，默认 `"env://"` |
-
-无需手动指定 `world_size`，由 `torchrun --nproc_per_node` 自动设置。
-
----
-
-### 【训练流程控制】
-
-| 参数 | 说明 |
-|:----|:----|
-| `workflow` | 训练/验证阶段及其迭代次数 |
-| `total_epochs` | 总训练轮数 |
-
----
-
-### 【Hooks 配置】
-
-包含一系列自动化钩子，例如：
-
-- `metrics`：自动计算 top1、top5 准确率
-- `checkpoint`：保存模型
-- `resume`：支持断点续训
-- `lr_scheduler`：学习率调度器（如 `CosineAnnealingLR`、`StepLR`）
-- `logger`：控制台+文件日志
-- `tensorboard`：日志可视化
-- `wandb`：可选接入 W&B 项目管理（可关闭）
-
----
-
-### 【数据集与Dataloader】
-
-| 参数 | 说明 |
-|:----|:----|
-| `data.train` | 训练集设置，需指定 `type` 和标注文件路径 |
-| `data.val` | 验证集设置 |
-| `train_dataloader` | batch size、workers 等参数 |
-| `val_dataloader` | 同上 |
-
-**注意：** 目前使用的是 `ClassificationImageDataset`，自带图像分类的标准数据集读取方式。
-
----
-
-### 【模型定义】
-
-| 参数 | 说明 |
-|:----|:----|
-| `model.type` | 如 `"resnet50"`，支持框架内置模型或注册自定义模型 |
-| `num_classes` | 类别数 |
-
----
-
-### 【损失函数】
-
-| 参数 | 说明 |
-|:----|:----|
-| `loss.type` | 损失函数类型，如 `"CrossEntropyLoss"` |
-| `loss.weight` | （可选）各类别权重 |
-| `loss.reduction` | 损失聚合方式，如 `"mean"` |
-
----
-
-### 【优化器】
-
-| 参数 | 说明 |
-|:----|:----|
-| `optimizer.type` | 如 `"AdamW"`、`"Adam"` 等 |
-| `lr` | 初始学习率 |
-| `weight_decay` | 权重衰减正则项 |
-
----
-
-# config 配置参数介绍
-## 1. dist:
-|参数|意义|典型取值及说明|
-|--|--|--|
-|backend|分布式通信后端，决定多进程间如何同步。|nccl（多GPU推荐），gloo（支持CPU）|
-|world_size|进程总数，代表有多少份参与分布式训练。|1（单机/单卡），8（比如2机各4卡）|
-|init_method|分布式初始化方式及主节点位置获取方式。|env://（推荐），tcp://ip:port|
-- backend: nccl
-
-含义：指定分布式通信后端
-
-常见取值：nccl：NVIDIA Collective Communications Library。
-最快且默认用于多GPU训练，只能在NVIDIA GPU环境下用。几乎所有多卡训练都推荐用它。
-
-gloo：PyTorch自带的通用后端，支持CPU和GPU，但在多GPU上没有nccl高效。
-
-mpi：基于MPI，适合对分布式有特别需求的场景。现在用得较少。
-
-示例：
-```python
-dist.init_process_group(backend="nccl", ...)
-```
-- world_size: 1
-
-含义：全局参与分布式训练的“总进程数”。
-
-通常每张卡/每台机器一个进程。
-
-你在单机单卡训练时一般设为1（其实可以不设，但合理填1最安全）。
-
-多机多卡/单机多卡要填实际的总进程数。例如：2台机器，每台4张卡，world_size 就是8。
-
-用途：
-
-
-让每个分布式进程都知道总共有几份任务会同步参数/数据。
-
-- init_method: env://
-
-含义：分布式通信初始化的方法。
-
-"env://" 代表：“通讯参数通过环境变量获得”。是目前官方最推荐的，理由是跨环境、易于启动脚本兼容容器/K8S任务。
-
-你用 torchrun 或 python -m torch.distributed.launch 启动时，这些会自动设置 MASTER_ADDR、MASTER_PORT、RANK、WORLD_SIZE 等环境变量。
-
-其它常见值：
-
-tcp://IP:PORT：直接指定主节点IP和端口。（如tcp://127.0.0.1:23456）
-
-file:///path/to/some/file：少见，现在基本不用，早期某些实验环境可用。

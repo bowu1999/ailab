@@ -5,6 +5,7 @@ import numpy as np
 from tqdm import tqdm
 
 from ailab.builder import build_metrics
+from ailab.utils import call_fn, OutputWrapper
 
 
 def set_seed(seed):
@@ -16,14 +17,9 @@ def set_seed(seed):
 
 
 def get_output_device(outputs):
-    """
-    从模型输出outputs中提取device，支持Tensor、tuple、list、dict等各种类型
-    如果没找到Tensor，则返回 cpu device。
-    """
     if torch.is_tensor(outputs):
         return outputs.device
     elif isinstance(outputs, (tuple, list)):
-        # 递归查找第一个Tensor
         for item in outputs:
             device = get_output_device(item)
             if device is not None:
@@ -33,23 +29,7 @@ def get_output_device(outputs):
             device = get_output_device(v)
             if device is not None:
                 return device
-    # 没有找到tensor时的fallback
     return torch.device('cpu')
-
-
-def move_to_device(data, device):
-    """
-    递归将Tensor转移到device，支持Tensor、dict、list、tuple等结构。
-    其它类型原样返回。
-    """
-    if torch.is_tensor(data):
-        return data.to(device, non_blocking=True)
-    elif isinstance(data, dict):
-        return {k: move_to_device(v, device) for k, v in data.items()}
-    elif isinstance(data, (list, tuple)):
-        return type(data)(move_to_device(v, device) for v in data)
-    else:
-        return data
 
 
 def get_batch_size(targets):
@@ -66,114 +46,123 @@ def get_batch_size(targets):
     raise ValueError("Cannot infer batch size from targets")
 
 
-def to_float_recursively(data):
+def move_to_device(data, device):
     if torch.is_tensor(data):
-        return data.float()
+        return data.to(device, non_blocking=True)
     elif isinstance(data, dict):
-        return {k: to_float_recursively(v) for k,v in data.items()}
+        return {k: move_to_device(v, device) for k, v in data.items()}
     elif isinstance(data, (list, tuple)):
-        return type(data)(to_float_recursively(v) for v in data)
+        return type(data)(move_to_device(v, device) for v in data)
     else:
         return data
 
 
-def to_correct_dtype_targets(targets, classify_keys=['cls']):
-    """
-    对 targets 递归处理，
-    - 如果 key 属于 classify_keys，转为long（分类标签）
-    - 其它转 float（浮点输出）
-    """
-    if torch.is_tensor(targets):
-        # 如果单个 tensor，没有键，默认转 long？
-        return targets.long()
-    elif isinstance(targets, dict):
-        ret = {}
-        for k, v in targets.items():
-            if k in classify_keys and torch.is_tensor(v):
-                ret[k] = v.long()
-            elif torch.is_tensor(v):
-                ret[k] = v.float()
-            else:
-                ret[k] = v
-        return ret
-    elif isinstance(targets, (list, tuple)):
-        return type(targets)(to_correct_dtype_targets(v, classify_keys) for v in targets)
-    else:
-        return targets
-
-
 class WorkFlow:
+    """
+    通用训练/验证/测试流程类 (WorkFlow):
+
+    核心职责：
+      1. 根据 cfg 实例化并包装模型、优化器、Loss 及 Hooks 等组件
+      2. 在各阶段 (train/val/test) 调度数据读取、前向、Loss 计算及 Hook 调用
+      3. 支持 Hook 机制，所有指标的 reset/update/compute 均由 MetricHook 处理
+
+    使用示例：
+      # 1. 实例化核心组件
+      model     = build_from_cfg(cfg['model'], registry=MODEL_REGISTRY)
+      optimizer = build_from_cfg(cfg['optimizer'], registry=OPTIMIZER_REGISTRY)
+      criterion = build_from_cfg(cfg['loss'], registry=LOSS_REGISTRY)
+
+      # 2. 构造 DataLoader
+      train_ds    = build_from_cfg(cfg['data']['train'], registry=DATASET_REGISTRY)
+      train_loader= DataLoader(train_ds, **cfg['data']['train_dataloader'])
+      val_ds      = build_from_cfg(cfg['data']['val'], registry=DATASET_REGISTRY)
+      val_loader  = DataLoader(val_ds, **cfg['data']['val_dataloader'])
+
+      # 3. 初始化 WorkFlow 并注册所有 Hook
+      wf = WorkFlow(cfg, model, optimizer, criterion)
+      hooks = build_from_cfg_list(cfg['hooks'], registry=HOOKS_REGISTRY)
+      wf.register_hooks(hooks)
+
+      # 4. 执行
+      wf.run({'train':train_loader, 'val':val_loader}, cfg['workflow'], cfg['total_epochs'])
+    """
     def __init__(self, cfg, model, optimizer, criterion):
         self.cfg = cfg
+        # 模型包装：规范输出为 dict
+        self.model_mapping = cfg.get('model', {}).get('mapping', {})
         self.model = model
+        # 优化器与 Loss
         self.optimizer = optimizer
         self.criterion = criterion
         # 工作目录
         self.work_dir = cfg['work_dir']
         os.makedirs(self.work_dir, exist_ok=True)
-        # 构建 metrics
-        self.metrics = build_metrics(cfg.get('metrics', {}))
-        self.metric_results = {}
-        # state
+        # Hook 存储
         self.hooks = []
+        # 训练状态
         self.epoch = 0
         self.iter = 0
         self.last_loss = None
         self.last_outputs = None
         self.last_targets = None
 
-    def _get_world_size(self):
-        # 优先用 torch.distributed，fallback 到 cfg['dist']
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return torch.distributed.get_world_size()
-
-        return self.cfg.get('dist', {}).get('world_size', 1)
-
-    def _call_model(self, data):
-        if isinstance(data, dict):
-            inputs = data.get('input')
-            targets = {k: v for k, v in data.items() if k != 'input'}
-            if len(targets) == 1:
-                targets = next(iter(targets.values()))
-        elif isinstance(data, (list, tuple)) and len(data) >= 2:
-            inputs, targets = data[0], data[1]
-        else:
-            inputs, targets = data, None
-
-        device = next(self.model.parameters()).device
-        inputs = move_to_device(inputs, device)
-        if torch.is_tensor(inputs):
-            inputs = inputs.float()
-        else:
-            inputs = to_float_recursively(inputs)
-
-        if targets is not None:
-            targets = move_to_device(targets, device)
-            targets = to_correct_dtype_targets(targets, classify_keys=['cls'])
-
-        outputs = self.model(inputs)
-        self.last_outputs = outputs
-        self.last_targets = targets
-        return outputs, targets
-
     def register_hooks(self, hooks):
+        """注册 Hook 列表"""
         self.hooks.extend(hooks)
 
     def call_hook(self, name):
+        """调用所有 Hook 的 name 方法"""
         for hook in self.hooks:
             getattr(hook, name, lambda wf: None)(self)
 
+    def _get_world_size(self):
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_world_size()
+        return self.cfg.get('dist', {}).get('world_size', 1)
+
+    def _call_model(self, batch):
+        """
+        1) 支持 batch: dict OR tuple/list
+        2) 自动把 (inputs,targets) 包装为 {'input':..., 'target':...}
+        3) 其余逻辑不变
+        """
+        # —— 新增：tuple 支持 —— #
+        if not isinstance(batch, dict):
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                # 假设第 0 项是 inputs，第 1 项是 targets
+                batch = {'input': batch[0], 'target': batch[1]}
+            else:
+                raise ValueError(f"Unsupported batch type {type(batch)}")
+
+        # 找到底层模型（兼容 DDP）
+        wrapped = getattr(self.model, 'module', self.model)
+        device  = next(wrapped.parameters()).device
+
+        # 1) 设备迁移
+        batch = move_to_device(batch, device)
+
+        # 2) 模型前向：只传入模型真正需要的字段
+        outputs = call_fn(self.model, batch, mapping=self.model_mapping)
+        self.last_outputs = outputs
+
+        # 3) 合并字典，供 Loss/Metric 调用
+        self.last_data = {**batch, **outputs}
+        return outputs, self.last_data
+
     def run(self, data_loaders, workflow_cfg, total_epochs):
+        """
+        执行流程：依次触发 before_run -> 各 phase -> after_run
+        """
         self.call_hook('before_run')
         for ep in range(self.epoch, total_epochs):
             self.epoch = ep
             set_seed(self.cfg.get('seed', 0) + ep)
             for phase_cfg in workflow_cfg:
-                phase = phase_cfg['phase']
+                phase = phase_cfg['phase']  # 'train'/'val'/'test'
                 iters = phase_cfg.get('iters', None)
                 self.call_hook(f'before_{phase}_epoch')
                 method = getattr(self, f'_{phase}_epoch', None)
-                if method is not None:
+                if method:
                     method(data_loaders.get(phase, []), iters)
                 self.call_hook(f'after_{phase}_epoch')
         self.call_hook('after_run')
@@ -181,37 +170,33 @@ class WorkFlow:
     def _train_epoch(self, loader, iters):
         self.model.train()
         world_size = self._get_world_size()
-        total_iters = iters if iters is not None else len(loader)
+        total_iters = iters or len(loader)
         self.max_iter = total_iters
-        is_main = int(os.environ.get('LOCAL_RANK', 0)) == 0
-        pbar = tqdm(total=total_iters,
-                    desc=f'Train Epoch {self.epoch}',
-                    disable=not is_main)
+        is_main = (int(os.environ.get('LOCAL_RANK', 0)) == 0)
+        pbar = tqdm(total=total_iters, desc=f'Train {self.epoch}', disable=not is_main, leave=False)
         samples = 0
         data_iter = iter(loader)
         try:
             for _ in range(total_iters):
                 self.call_hook('before_train_iter')
-                try:
-                    batch = next(data_iter)
-                except StopIteration:
+                cpu_batch = next(data_iter, None)
+                if cpu_batch is None:
                     break
-                outputs, targets = self._call_model(batch)
-                if targets is None:
-                    raise ValueError('Training data must return targets')
-                # 确保 outputs 和 targets 在同一设备上
-                device = get_output_device(outputs)
-                loss = self.criterion(outputs, targets)
+                # 让 _call_model 同时返回 outputs 和 GPU 上的 data
+                outputs, data = self._call_model(cpu_batch)
+                # 计算 Loss：全部从 data（GPU 上）读取
+                loss = call_fn(self.criterion, data, mapping = self.cfg['loss'].get('mapping', {}))
                 self.last_loss = loss.item() if hasattr(loss, 'item') else loss
+                # 反向 & 优化
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                self.iter += 1
-                # 累计样本数
-                bs = get_batch_size(targets)
+                # 样本统计
+                bs = get_batch_size(data.get('target', outputs))
                 samples += bs * world_size
                 if is_main:
                     pbar.set_postfix({'Samples': samples})
+                self.iter += 1
                 self.call_hook('after_train_iter')
                 pbar.update(1)
         finally:
@@ -220,68 +205,55 @@ class WorkFlow:
     def _val_epoch(self, loader, iters=None):
         self.model.eval()
         world_size = self._get_world_size()
-        total_iters = iters if iters is not None else len(loader)
+        total_iters = iters or len(loader)
         self.max_iter = total_iters
-        is_main = int(os.environ.get('LOCAL_RANK', 0)) == 0
-        pbar = tqdm(total=total_iters,
-                    desc=f'Val   Epoch {self.epoch}',
-                    disable=not is_main)
+        is_main = (int(os.environ.get('LOCAL_RANK', 0)) == 0)
+        pbar = tqdm(total=total_iters, desc=f'Val {self.epoch}', disable=not is_main, leave=False)
         samples = 0
         data_iter = iter(loader)
-        # before_val_epoch Hook（比如 MetricHook 会 reset）
-        self.call_hook('before_val_epoch')
         try:
             with torch.no_grad():
                 for _ in range(total_iters):
                     self.call_hook('before_val_iter')
-                    try:
-                        batch = next(data_iter)
-                    except StopIteration:
+                    batch = next(data_iter, None)
+                    if batch is None:
                         break
-                    outputs, targets = self._call_model(batch)
-                    # 累计样本数（targets 可能是 dict/tuple，需要自行调整）
-                    if targets is not None:
-                        bs = get_batch_size(targets)
-                        samples += bs * world_size
+                    outputs = self._call_model(batch)
+
+                    # 触发 after_val_iter 钩子，MetricHook 会在此更新指标
+                    self.call_hook('after_val_iter')
+
+                    bs = get_batch_size(batch.get('target', outputs))
+                    samples += bs * world_size
                     if is_main:
                         pbar.set_postfix({'Samples': samples})
-                    # after_val_iter Hook（MetricHook 会 update）
-                    self.call_hook('after_val_iter')
                     pbar.update(1)
         finally:
             pbar.close()
-        # after_val_epoch Hook（MetricHook 会 compute 并写入 wf.metric_results）
-        self.call_hook('after_val_epoch')
 
     def _test_epoch(self, loader, iters=None):
-        # test 完全沿用 val 的逻辑，只是 Hook 名称不同
         self.model.eval()
         world_size = self._get_world_size()
-        total_iters = iters if iters is not None else len(loader)
+        total_iters = iters or len(loader)
         self.max_iter = total_iters
-        is_main = int(os.environ.get('LOCAL_RANK', 0)) == 0
-        pbar = tqdm(total=total_iters,
-                    desc=f'Test  Epoch {self.epoch}',
-                    disable=not is_main)
+        is_main = (int(os.environ.get('LOCAL_RANK', 0)) == 0)
+        pbar = tqdm(total=total_iters, desc=f'Test {self.epoch}', disable=not is_main, leave=False)
         samples = 0
         data_iter = iter(loader)
-        self.call_hook('before_test_epoch')
         try:
             with torch.no_grad():
                 for _ in range(total_iters):
                     self.call_hook('before_test_iter')
-                    try:
-                        batch = next(data_iter)
-                    except StopIteration:
+                    batch = next(data_iter, None)
+                    if batch is None:
                         break
-                    outputs, targets = self._call_model(batch)
-                    if targets is not None:
-                        bs = get_batch_size(targets)
-                        samples += bs * world_size
+                    outputs = self._call_model(batch)
+                    self.call_hook('after_test_iter')
+
+                    bs = get_batch_size(batch.get('target', outputs))
+                    samples += bs * world_size
                     if is_main:
                         pbar.set_postfix({'Samples': samples})
-                    self.call_hook('after_test_iter')
                     pbar.update(1)
         finally:
             pbar.close()
-        self.call_hook('after_test_epoch')

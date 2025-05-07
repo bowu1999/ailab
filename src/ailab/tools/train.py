@@ -12,6 +12,7 @@ from ailab.workflow import WorkFlow
 from ailab.utils.dist_utils import init_dist, DistributedSampler
 from ailab.hooks_extra import TensorboardHook, WandbHook
 from ailab.builder import build_dataset, build_model, build_optimizer, build_loss
+from ailab.utils import call_fn, OutputWrapper
 
 
 def ailab_train(cfg):
@@ -21,12 +22,12 @@ def ailab_train(cfg):
     # 初始化分布式环境（返回是否分布式训练）
     is_dist = init_dist(cfg)
 
-    # info
+    # 训练配置
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if is_dist else 0
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
-    # dataloaders
+    # 数据集及数据加载器
     loaders = {}
     for phase in ['train', 'val', 'test']:
         if phase in cfg['data']:
@@ -41,20 +42,24 @@ def ailab_train(cfg):
                 dl_cfg.pop('shuffle')
             loaders[phase] = DataLoader(ds, sampler=sampler, **dl_cfg)
 
-    # model & optimizer
-    model = build_model(cfg['model'])
-    model = model.cuda(local_rank)
+    # 模型和优化器
+    model = build_model(cfg['model']).cuda(local_rank)
+    # 先 wrap 输出，设置 signature
+    wrapped = OutputWrapper(model, output_keys=cfg['model'].get('output_keys', ['output']))
+    # 然后再作 DDP
     if is_dist:
         model = DDP(
-            model,
+            wrapped,
             device_ids = [local_rank],
             output_device = local_rank,
             find_unused_parameters = True,
             static_graph = True
         )
+    else:
+        model = wrapped
     optimizer = build_optimizer(cfg['optimizer'], model.parameters())
 
-    # criterion
+    # 损失函数
     criterion = build_loss(cfg['loss'])
     if torch.cuda.is_available():
         criterion = criterion.cuda(local_rank)
@@ -72,14 +77,15 @@ def ailab_train(cfg):
                     "!= model output classes {num_classes}, removing weight.")
             criterion.register_buffer('weight', None)
 
+    # 实例化 WorkFlow
     wf = WorkFlow(cfg, model, optimizer, criterion)
 
+    # 计算总共的 steps（total_steps）
     dataset_size = len(loaders['train'].dataset)
     batch_size = cfg.get("data").get("train_dataloader").get("batch_size")
     num_epochs = cfg.get("total_epochs")
-
-    # 计算 total_steps
     total_steps = num_epochs * ceil(dataset_size / batch_size / world_size)
+
     # hooks注册
     hooks = []
     if 'hooks' in cfg:
@@ -108,7 +114,6 @@ def ailab_train(cfg):
                 hooks.append(HookClass(hook_cfg, optimizer, total_steps))
             else:
                 hooks.append(HookClass(hook_cfg))
-
     wf.register_hooks(hooks)
 
     # 启动流程

@@ -174,18 +174,18 @@ if os.path.isdir(_schedulers_pkg):
 # -----------------------
 # 自动注册 torchmetrics 库中的所有 Metric 类
 # -----------------------
-try:
-    import torchmetrics
-    for module_info in pkgutil.walk_packages(torchmetrics.__path__, torchmetrics.__name__ + '.'):
-        module = importlib.import_module(module_info.name)
-        for name, obj in inspect.getmembers(module):
-            if inspect.isclass(obj):
-                try:
-                    METRICS.register_module(obj, name=name)
-                except Exception:
-                    pass
-except ImportError:
-    pass
+# try:
+#     import torchmetrics
+#     for module_info in pkgutil.walk_packages(torchmetrics.__path__, torchmetrics.__name__ + '.'):
+#         module = importlib.import_module(module_info.name)
+#         for name, obj in inspect.getmembers(module):
+#             if inspect.isclass(obj):
+#                 try:
+#                     METRICS.register_module(obj, name=name)
+#                 except Exception:
+#                     pass
+# except ImportError:
+#     pass
 
 # -----------------------
 # 自动递归导入&注册 metrics
