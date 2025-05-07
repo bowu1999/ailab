@@ -49,7 +49,7 @@ pip install -e .
 
 ### 2. 编写自定义组件
 
-在 `train.py` 中注册：
+在自己的工作目录下新建 `train.py` 文件，并在其中进行如下注册：
 
 ```python
 import torch.nn as nn
@@ -89,6 +89,8 @@ if __name__ == "__main__":
 ```
 
 ### 3. 编写配置文件 `config.py`
+
+在同一工作目录下新建 `config.py` 文件：
 
 ```python
 cfg = dict(
@@ -149,6 +151,13 @@ cfg = dict(
     )
 )
 ```
+
+### 启动训练
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 train.py
+```
+
+> 源码仓库中的 example 中是一个简单的使用示例
 
 ---
 
