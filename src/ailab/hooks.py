@@ -1,5 +1,6 @@
 import os
 import torch
+from pathlib import Path
 import torch.distributed as dist
 
 from ailab.builder import build_metrics, build_scheduler
@@ -203,7 +204,8 @@ class CheckpointHook(Hook):
 
     def after_train_epoch(self, wf):
         if self.checkpointer is None:
-            save_dir = self.save_dir if self.save_dir is not None else wf.work_dir
+            save_dir = self.save_dir if self.save_dir is not None else Path(wf.work_dir) / 'checkpoints'
+            save_dir.mkdir(parents=True, exist_ok=True)
             self.checkpointer = Checkpointer(save_dir)
         if (wf.epoch + 1) % self.interval == 0:
             self.checkpointer.save(wf.model, wf.optimizer, wf.epoch)
