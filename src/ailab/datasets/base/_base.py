@@ -52,15 +52,15 @@ class FileAnnotationDataset(LabBaseDataset):
     单文件存储标注，如 CSV、TXT、JSON 列表等。
     load_fun 返回行列表或 DataFrame。
     """
-    def __init__(self, annot_file: str, load_fun):
-        self.annot_path = Path(annot_file)
-        self.raw_data = load_fun(str(self.annot_path))
+    def __init__(self, annotation_file: str, load_fun):
+        self.annotation_path = Path(annotation_file)
+        self.samples = load_fun(str(self.annotation_path))
 
     def _len(self):
-        return len(self.raw_data)
+        return len(self.samples)
 
     def _get_raw(self, idx):
-        return self.raw_data[idx]
+        return self.samples[idx]
 
     @abstractmethod
     def _get_sample(self, raw):
