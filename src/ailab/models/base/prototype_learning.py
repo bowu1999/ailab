@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 from pathlib import Path
-from torch.utils.data import DataLoader
 from sklearn.cluster import MiniBatchKMeans
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics.pairwise import euclidean_distances, cosine_similarity
 
@@ -47,19 +47,28 @@ class ProtoClassifier:
         预测输入样本所属的类别。
         
         参数:
-        X (np.ndarray): 待预测样本特征矩阵，形状为 (n_samples, feat_dim)。
+            X (np.ndarray): 待预测样本特征矩阵，形状为 (n_samples, feat_dim)。
         
         返回:
-        np.ndarray: 预测结果，长度为 n_samples 的一维数组，每个元素是预测的类别索引。
+            np.ndarray: 预测结果，长度为 n_samples 的一维数组，每个元素是预测的类别索引。
         """
-        dists = []  # 存储每类到样本的距离
+        X = np.asarray(X)
+        n_samples = X.shape[0]
+        dists = []
+
         for c, pcs in enumerate(self.prototypes):
-            # 计算当前类别所有原型与待预测样本之间的欧氏距离
-            d = euclidean_distances(X, pcs)
-            # 对于每个样本，选择到最近原型的距离作为该样本到该类别的距离
-            dists.append(d.min(axis=1))
-        # 找出每个样本距离最近的类别索引
-        return np.argmin(np.stack(dists, axis=1), axis=1)
+            if pcs is None:
+                # 该类没有原型，用无穷大填充，保证永不被选中
+                dists.append(np.full(n_samples, np.inf))
+            else:
+                # 计算到每个原型的距离，取最小值
+                d = euclidean_distances(X, pcs)
+                dists.append(d.min(axis=1))
+
+        # 堆叠成 (n_samples, num_classes)，每列是每个类别的最小距离
+        dists = np.stack(dists, axis=1)
+        # 每行选最小距离对应的类别
+        return np.argmin(dists, axis=1)
     
     def partial_update(self, X_new, y_new):
         """
@@ -129,3 +138,96 @@ def extract_image_features_and_labels(model, dataset, output_dir, batch_size=32,
     # 保存特征和标签
     np.save(Path(output_dir) / 'features.npy', all_features)
     np.save(Path(output_dir) / 'labels.npy', all_labels)
+
+
+def evaluate_proto_classifier(
+    proto_clf,
+    val_X,
+    val_y,
+    batch_size: int = 32,
+    num_workers: int = 8,
+    need_cls_error_inx: bool = False,
+    need_error_details: bool = False
+):
+    """
+    评估基于原型的分类器在验证集上的性能，并可选返回错误样本的详细信息。
+
+    参数:
+        proto_clf (ProtoClassifier): 已训练并包含原型的分类器实例。
+        val_X (np.ndarray or torch.Tensor): 验证集特征矩阵，形状 (N, feat_dim)。
+        val_y (np.ndarray or torch.Tensor): 验证集标签向量，长度 N。
+        batch_size (int): DataLoader 的批大小。
+        num_workers (int): DataLoader 并行加载的线程数。
+        need_cls_error_inx (bool): 是否返回分类错误样本的全局索引列表。
+        need_error_details (bool): 是否返回分类错误样本的详细三元组列表。
+
+    返回:
+        accuracy (float): 分类正确率（[0,1]）。
+        error_indices (list[int], optional): 当 need_cls_error_inx=True 时，返回错误样本索引列表。
+        error_details (list[(int, int, int)], optional): 
+            当 need_error_details=True 时，返回一个三元组列表，每项为 (sample_index, pred_label, true_label)。
+    """
+    # 1. 准备 numpy 数组
+    if torch.is_tensor(val_X):
+        X_np = val_X.cpu().numpy()
+    else:
+        X_np = np.asarray(val_X)
+    if torch.is_tensor(val_y):
+        y_np = val_y.cpu().numpy()
+    else:
+        y_np = np.asarray(val_y)
+
+    # 2. 构造 DataLoader
+    X_tensor = torch.from_numpy(X_np).float()
+    y_tensor = torch.from_numpy(y_np).long()
+    dataset = TensorDataset(X_tensor, y_tensor)
+    loader = DataLoader(dataset,
+                        batch_size=batch_size,
+                        shuffle=False,
+                        num_workers=num_workers)
+
+    # 3. 遍历预测并统计
+    total = 0
+    correct = 0
+    error_indices = []
+    error_details = []
+    running_index = 0
+
+    with torch.no_grad():
+        for feats_batch, labels_batch in loader:
+            feats_np = feats_batch.cpu().numpy()
+            labels_np = labels_batch.cpu().numpy()
+
+            # 调用 predict
+            preds = proto_clf.predict(feats_np)
+
+            # 统计正确率
+            batch_size_actual = labels_np.shape[0]
+            total += batch_size_actual
+            mask = (preds == labels_np)
+            correct += int(mask.sum())
+
+            # 记录错误样本信息
+            wrong = np.where(~mask)[0]
+            for idx in wrong:
+                global_idx = running_index + int(idx)
+                if need_cls_error_inx:
+                    error_indices.append(global_idx)
+                if need_error_details:
+                    error_details.append((global_idx, int(preds[idx]), int(labels_np[idx])))
+
+            running_index += batch_size_actual
+
+    # 4. 结果处理
+    accuracy = correct / total if total > 0 else 0.0
+
+    outputs = [accuracy]
+    if need_cls_error_inx:
+        outputs.append(error_indices)
+    if need_error_details:
+        outputs.append(error_details)
+
+    # 如果只有 accuracy，则直接返回数值
+    if len(outputs) == 1:
+        return outputs[0]
+    return tuple(outputs)
