@@ -183,6 +183,20 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=12345 tra
 
 ---
 
+## 相关说明
+
+ailab 中提供了函数 `remove_module_prefix`，用于移除 `checkpoint` 文件中模型相关参数的 `module.` 前缀。
+
+在加载模型时可以使用如下的方式
+```python
+from ailab import remove_module_prefix
+
+model = MyModel()
+checkpoint_path = "/path/checkpoint.pth"
+checkpoint = torch.load(checkpoint_path, weights_only=False)
+model.load_state_dict(remove_module_prefix(checkpoint['model_state']))
+```
+
 通过上述说明，你可以快速上手 AILab，利用其高度模块化与配置驱动的设计，以最小改动实现复杂任务的训练与评估。
 ## 项目结构
 ```bash

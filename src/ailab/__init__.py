@@ -7,4 +7,5 @@ from .hooks_extra import *
 from .datasets import *
 from .schedulers import *
 from .losses import *
+from .models import *
 from ailab.tools.train import ailab_train
