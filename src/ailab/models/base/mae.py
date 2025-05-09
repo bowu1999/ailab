@@ -36,7 +36,6 @@ class MAEEncoder(nn.Module):
         x = self.patch_embed(x)
         x = x + self.pos_embed
         B, N, C = x.shape
-
         # If no mask provided (inference), treat all tokens as visible
         if mask is None:
             # Create a false mask: no tokens are masked
@@ -49,7 +48,6 @@ class MAEEncoder(nn.Module):
                 mask = mask.to(torch.bool)
             # support mask broadcast or reshape if needed
             mask = mask.view(B, N)
-
         # select only visible tokens
         # x[~mask] flattens batch, so reshape back
         x_visible = x[~mask].reshape(B, -1, C)
@@ -85,11 +83,6 @@ class MAEDecoder(nn.Module):
         num_masked = mask.sum(dim=1)[0].item()  # 第一个样本的被 mask 数（假设都一样）
         mask_tokens = self.mask_token.expand(B, num_masked, -1)
         x_full = torch.zeros(B, mask.shape[1], x.shape[2], device=x.device)
-        # # fill visible
-        # x_full[~mask] = x.reshape(-1, x.shape[2])
-        # # fill masked
-        # x_full[mask] = mask_tokens.reshape(-1, x.shape[2])
-        x_full = torch.zeros(B, mask.shape[1], x.shape[2], device=x.device)
         # 将 mask 转换为布尔类型
         mask_bool = mask.to(torch.bool)
         # 使用 masked_scatter_ 将可见的 x 值填充到 x_full 中
@@ -100,6 +93,7 @@ class MAEDecoder(nn.Module):
         for blk in self.blocks:
             x_full = blk(x_full)
         return self.head(self.norm(x_full))
+
 
 # -- 1.4 Full MAE with pretrain loading --
 class MaskedAutoencoder(nn.Module):
