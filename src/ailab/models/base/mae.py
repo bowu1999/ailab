@@ -18,31 +18,49 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, 'b c h w -> b (h w) c')
         return x
 
+
 # -- 1.2 Encoder (asymmetric, only visible tokens) --
 class MAEEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, depth=12, num_heads=12):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
-        # 自学习位置编码
+        # learnable position embeddings
         self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches, embed_dim))
         self.blocks = nn.ModuleList([
             LabAttentionBlock(embed_dim, num_heads, mlp_ratio=4.) for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
+        # x: [B,3,H,W]
         x = self.patch_embed(x)
         x = x + self.pos_embed
-        # 确保 mask 是布尔类型
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.tensor(mask, device=x.device, dtype=torch.bool)
-        if mask.dtype != torch.bool:
-            mask = mask.to(torch.bool)
-        # 使用布尔索引选择可见 token
-        x_visible = x[~mask].reshape(x.shape[0], -1, x.shape[-1])
+        B, N, C = x.shape
+
+        # If no mask provided (inference), treat all tokens as visible
+        if mask is None:
+            # Create a false mask: no tokens are masked
+            mask = torch.zeros((B, N), device=x.device, dtype=torch.bool)
+        else:
+            # ensure tensor and bool type
+            if not isinstance(mask, torch.Tensor):
+                mask = torch.tensor(mask, device=x.device, dtype=torch.bool)
+            if mask.dtype != torch.bool:
+                mask = mask.to(torch.bool)
+            # support mask broadcast or reshape if needed
+            mask = mask.view(B, N)
+
+        # select only visible tokens
+        # x[~mask] flattens batch, so reshape back
+        x_visible = x[~mask].reshape(B, -1, C)
+
+        # forward through transformer blocks
         for blk in self.blocks:
             x_visible = blk(x_visible)
+        
+        # final normalization
         return self.norm(x_visible)
+
 
 # -- 1.3 Decoder (lightweight) --
 class MAEDecoder(nn.Module):
