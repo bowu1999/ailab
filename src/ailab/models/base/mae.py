@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-from torch.nn.functional import mse_loss
 
 from .transformer import LabAttentionBlock
 
