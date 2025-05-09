@@ -21,43 +21,87 @@ class PatchEmbed(nn.Module):
 
 # -- 1.2 Encoder (asymmetric, only visible tokens) --
 class MAEEncoder(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, embed_dim=768, depth=12, num_heads=12):
+    def __init__(
+        self,
+        img_size = 224,
+        patch_size = 16,
+        embed_dim = 768,
+        depth = 12,
+        num_heads = 12,
+        use_cls = False,
+        use_norm = None
+    ):
+        """
+        use_cls: bool, whether to prepend a learnable CLS token
+        use_norm: str or None, 'GAP' or 'GMP' (case-insensitive) for global pooling if not using CLS
+        """
         super().__init__()
+        self.use_cls = use_cls
+        self.use_norm = use_norm.lower() if isinstance(use_norm, str) else None
+        # Patch embedding and position embeddings
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
-        # learnable position embeddings
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches, embed_dim))
+        num_patches = self.patch_embed.num_patches
+        if self.use_cls:
+            # Learnable [CLS] token + extended position embeddings
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+            nn.init.trunc_normal_(self.cls_token, std=.02)
+        else:
+            # Only patch tokens
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+        # Transformer blocks and norm
         self.blocks = nn.ModuleList([
-            LabAttentionBlock(embed_dim, num_heads, mlp_ratio=4.) for _ in range(depth)
+            LabAttentionBlock(embed_dim, num_heads, mlp_ratio=4.)
+            for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(embed_dim)
+        nn.init.trunc_normal_(self.pos_embed, std=.02)
 
     def forward(self, x, mask=None):
-        # x: [B,3,H,W]
-        x = self.patch_embed(x)
+        B = x.shape[0]
+        # Patch embedding
+        x = self.patch_embed(x)  # [B, N, C]
+        # CLS token branch
+        if self.use_cls:
+            cls_tokens = self.cls_token.expand(B, -1, -1)  # [B,1,C]
+            x = torch.cat([cls_tokens, x], dim=1)           # [B, N+1, C]
+        # Add position embedding
         x = x + self.pos_embed
         B, N, C = x.shape
-        # If no mask provided (inference), treat all tokens as visible
+        # Build mask: shape matches patch tokens count
         if mask is None:
-            # Create a false mask: no tokens are masked
-            mask = torch.zeros((B, N), device=x.device, dtype=torch.bool)
+            mask_p = torch.zeros((B, N - (1 if self.use_cls else 0)),
+                                 device=x.device, dtype=torch.bool)
         else:
-            # ensure tensor and bool type
-            if not isinstance(mask, torch.Tensor):
-                mask = torch.tensor(mask, device=x.device, dtype=torch.bool)
-            if mask.dtype != torch.bool:
-                mask = mask.to(torch.bool)
-            # support mask broadcast or reshape if needed
-            mask = mask.view(B, N)
-        # select only visible tokens
-        # x[~mask] flattens batch, so reshape back
-        x_visible = x[~mask].reshape(B, -1, C)
-
-        # forward through transformer blocks
+            mask_p = torch.as_tensor(mask, device=x.device).to(torch.bool)
+            mask_p = mask_p.view(B, -1)
+        # Prepend False for CLS if present
+        if self.use_cls:
+            false_cls = torch.zeros((B, 1), device=x.device, dtype=torch.bool)
+            mask = torch.cat([false_cls, mask_p], dim=1)
+        else:
+            mask = mask_p
+        # Select visible tokens
+        x_vis = x[~mask].reshape(B, -1, C)
+        # Transformer blocks
         for blk in self.blocks:
-            x_visible = blk(x_visible)
-        
-        # final normalization
-        return self.norm(x_visible)
+            x_vis = blk(x_vis)
+        x_vis = self.norm(x_vis)
+        # Output logic
+        if self.use_cls:
+            # CLS token representation
+            return x_vis[:, 0]
+        elif self.use_norm:
+            # Global pooling when not using CLS
+            if self.use_norm == 'gap':
+                return x_vis.mean(dim=1)  # [B, C]
+            elif self.use_norm == 'gmp':
+                return x_vis.max(dim=1).values  # [B, C]
+            else:
+                raise ValueError(f"Unsupported use_norm: {self.use_norm}. Use 'GAP' or 'GMP'.")
+        else:
+            # Return all token embeddings
+            return x_vis
 
 
 # -- 1.3 Decoder (lightweight) --
