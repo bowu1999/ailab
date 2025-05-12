@@ -52,7 +52,7 @@ def ailab_train(cfg):
             wrapped,
             device_ids = [local_rank],
             output_device = local_rank,
-            find_unused_parameters = True,
+            # find_unused_parameters = True,
             static_graph = True
         )
     else:
