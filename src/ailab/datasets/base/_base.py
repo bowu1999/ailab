@@ -50,17 +50,25 @@ class LabBaseDataset(Dataset, ABC):
 # —— 标注存储方式抽象类 ——
 class FileAnnotationDataset(LabBaseDataset):
     """
-    单文件存储标注，如 CSV、TXT、JSON 列表等。
+    单文件或多文件存储标注，可支持路径或原始样本列表。
     load_fun 返回行列表或 DataFrame。
     """
-    def __init__(self, annotation_file: Union[str, Path, List[str]], load_fun):
-        if isinstance(annotation_file, (str, Path)):
-            annotation_paths = [annotation_file]
-        else:
-            annotation_paths = annotation_file
+    def __init__(self, annotation_file: Union[str, Path, list, tuple], load_fun):
+        # 解析 samples：支持 JSON/CSV 路径列表或直接传入的 raw 样本列表
         self.samples = []
-        for annotation_file in annotation_paths:
-            self.samples += load_fun(annotation_file)
+        if isinstance(annotation_file, (list, tuple)):
+            # 若列表元素不是文件路径，则直接认为是 raw 样本
+            if annotation_file and not isinstance(annotation_file[0], (str, Path)):
+                self.samples = annotation_file
+            else:
+                # 否则按路径加载
+                for f in annotation_file:
+                    self.samples += load_fun(f)
+        elif isinstance(annotation_file, (str, Path)):
+            # 单一路径
+            self.samples = load_fun(annotation_file)
+        else:
+            raise TypeError(f"Unsupported annotation_file type: {type(annotation_file)}")
 
     def _len(self):
         return len(self.samples)
