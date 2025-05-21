@@ -62,7 +62,7 @@ class C3(nn.Module):
         c_ = int(c2 * e)
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
-        self.m   = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
+        self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
         self.cv3 = Conv(2 * c_, c2, 1, 1)
 
     def forward(self, x):
@@ -73,13 +73,13 @@ class SPPF(nn.Module):
     """SPP-Fast"""
     def __init__(self, c1, c2, k=5):
         super().__init__()
-        c_     = c1 // 2
+        c_ = c1 // 2
         self.cv1 = Conv(c1, c_, 1, 1)
-        self.m   = nn.MaxPool2d(kernel_size=k, stride=1, padding=k//2)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k//2)
         self.cv2 = Conv(c_ * 4, c2, 1, 1)
 
     def forward(self, x):
-        x  = self.cv1(x)
+        x = self.cv1(x)
         y1 = self.m(x)
         y2 = self.m(y1)
         y3 = self.m(y2)
@@ -103,37 +103,45 @@ class Detect(nn.Module):
     """Detection head for 3 feature maps"""
     def __init__(self, nc=80, anchors=(), ch=(), strides=()):
         super().__init__()
-        self.nc      = nc
-        self.no      = nc + 5
-        self.na      = len(anchors[0]) // 2
-        self.nl      = len(anchors)
-        self.stride  = torch.tensor(strides)
+        self.nc = nc
+        self.no = nc + 5
+        self.na = len(anchors[0]) // 2
+        self.nl = len(anchors)
+        self.stride = torch.tensor(strides)
         self.anchors = torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2)
-        self.grid    = [torch.zeros(1)] * self.nl
-        self.m       = nn.ModuleList(
+        self.grid = [torch.zeros(1)] * self.nl
+        self.m = nn.ModuleList(
             nn.Conv2d(ch[i], self.no * self.na, 1) for i in range(self.nl)
         )
 
-    def forward(self, x):
-        z = []
-        for i, xi in enumerate(x):
-            bs, _, ny, nx = xi.shape
-            pred = self.m[i](xi).view(bs, self.na, self.no, ny, nx)
-            pred = pred.permute(0, 1, 3, 4, 2).contiguous()
-            # build grid
+    def forward(self, features):
+        raw_preds = []
+        decoded = []
+        for i, x in enumerate(features):
+            bs, _, ny, nx = x.shape
+            p = self.m[i](x).view(bs, self.na, self.no, ny, nx)
+            p = p.permute(0, 1, 3, 4, 2).contiguous()  # 原始输出 logits
+            raw_preds.append(p)
+            # 如果 grid 不匹配就重新生成
             if self.grid[i].shape[2:] != (ny, nx):
                 yv, xv = torch.meshgrid(
-                    torch.arange(ny), torch.arange(nx), indexing='ij'
+                    torch.arange(ny, device=p.device),
+                    torch.arange(nx, device=p.device),
+                    indexing = 'ij'
                 )
-                g = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float().to(pred.device)
-                self.grid[i] = g
-            psig = pred.sigmoid()
-            xy   = (psig[..., :2] * 2 - 0.5 + self.grid[i]) * self.stride[i]
-            wh   = (psig[..., 2:4] * 2) ** 2 * self.anchors[i].view(1, self.na, 1, 1, 2)
+                self.grid[i] = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float().to(p.device)
+            # 解码过程，仅用于推理
+            psig = p.sigmoid()
+            xy = (psig[..., :2] * 2 - 0.5 + self.grid[i]) * self.stride[i]
+            wh = (psig[..., 2:4] * 2) ** 2 * self.anchors[i].view(1, self.na, 1, 1, 2)
             conf = psig[..., 4:5]
-            cls  = psig[..., 5:]
-            z.append(torch.cat([xy, wh, conf, cls], dim=-1))
-        return z
+            cls = psig[..., 5:]
+            decoded.append(torch.cat([xy, wh, conf, cls], dim=-1))
+
+        # 如果是训练阶段，返回 raw logits；如果是推理阶段，返回解码结果
+        # 长度 3 的列表，表示每个层的输出
+        # [(batch_size, na, ny, nx, no), (batch_size, na, ny, nx, no), (batch_size, na, ny, nx, no)]
+        return raw_preds if self.training else decoded
 
 
 # --------------------------------------------
