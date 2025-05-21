@@ -1,9 +1,18 @@
+import cv2
 import json
+import torch
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from collections import defaultdict
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from typing import Callable, Any, List, Union
+import os
+
+# 禁用 Albumentations 的在线版本检查
+os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
+
+
 
 from ..utils import load_dicts_from_jsonlines
 from ._transform import std_transform
@@ -48,7 +57,92 @@ class ClassificationImageDataset(FileAnnotationDataset, ClassificationTask):
         return int(raw[self.y_key])
 
 
-class COCODataset(FileAnnotationDataset):
+# 定义数据增强流程
+common_aug = A.Compose(
+    [
+        # 将图像的最长边缩放到不超过640，保持宽高比
+        A.LongestMaxSize(max_size=640),
+        # 如果图像尺寸小于640x640，则进行填充，使用常数值填充（黑色）
+        A.PadIfNeeded(min_height=640, min_width=640, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
+        # 以50%的概率随机裁剪512x512的区域
+        A.RandomCrop(height=512, width=512, p=0.5),
+        # 以50%的概率进行水平翻转
+        A.HorizontalFlip(p=0.5),
+        # 以20%的概率进行垂直翻转
+        A.VerticalFlip(p=0.2),
+        # 以30%的概率进行仿射变换，包括平移、缩放和旋转
+        A.Affine(
+            translate_percent=0.05,  # 平移范围为±5%
+            scale=(0.9, 1.1),        # 缩放范围为90%到110%
+            rotate=(-5, 5),          # 旋转范围为±5度
+            p=0.3
+        ),
+        # 以80%的概率随机调整亮度和对比度
+        # brightness_limit和contrast_limit控制调整的范围
+        # 增加这些值可以增强模型对光照变化的鲁棒性
+        A.RandomBrightnessContrast(
+            brightness_limit=0.3,  # 亮度调整范围为±30%
+            contrast_limit=0.3,    # 对比度调整范围为±30%
+            p=0.8
+        ),
+        # 以80%的概率随机调整色调、饱和度和明度
+        # hue_shift_limit控制色调的变化范围
+        # sat_shift_limit控制饱和度的变化范围
+        # val_shift_limit控制明度的变化范围
+        # 增加这些值可以增强模型对颜色变化的鲁棒性
+        A.HueSaturationValue(
+            hue_shift_limit=15,    # 色调调整范围为±15
+            sat_shift_limit=25,    # 饱和度调整范围为±25
+            val_shift_limit=25,    # 明度调整范围为±25
+            p=0.8
+        ),
+        # 以50%的概率应用高斯模糊
+        # blur_limit控制模糊核的大小范围，必须为奇数
+        # 增加blur_limit的上限可以增强模型对模糊图像的鲁棒性
+        A.GaussianBlur(
+            blur_limit=(3, 9),     # 模糊核大小范围为3到9
+            p=0.5
+        ),
+        # 标准化图像，使其均值为0，标准差为1
+        # 使用ImageNet的均值和标准差
+        A.Normalize(
+            mean=(0.485, 0.456, 0.406),  # RGB通道的均值
+            std=(0.229, 0.224, 0.225)    # RGB通道的标准差
+        ),
+        # 将图像重新调整为640x640
+        A.Resize(height=640, width=640, interpolation=cv2.INTER_LINEAR, p=1.0),
+        # 将图像转换为PyTorch张量
+        ToTensorV2()
+    ],
+    # 设置边界框的参数
+    bbox_params=A.BboxParams(
+        format='yolo',             # 边界框格式为YOLO格式
+        label_fields=['category_ids'],  # 标签字段
+        min_visibility=0.5         # 最小可见度阈值，过滤掉可见度低的边界框
+    ),
+    # 设置关键点的参数
+    keypoint_params=A.KeypointParams(
+        format='xy',               # 关键点格式为(x, y)
+        remove_invisible=False     # 不移除不可见的关键点
+    )
+)
+
+def letterbox(img, new_size=640, color=(114, 114, 114)):
+    """等比缩放并填充到 (new_size, new_size)，返回 img, (scale, pad_w, pad_h)"""
+    h0, w0 = img.shape[:2]
+    r = min(new_size / h0, new_size / w0)
+    new_unpad = int(round(w0 * r)), int(round(h0 * r))
+    dw, dh = new_size - new_unpad[0], new_size - new_unpad[1]
+    dw /= 2
+    dh /= 2
+    img_resized = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img_padded = cv2.copyMakeBorder(img_resized, top, bottom, left, right,
+                                    cv2.BORDER_CONSTANT, value=color)
+    return img_padded, (r, left, top)
+
+class COCODataset:
     """
     annotation_file: COCO JSON 文件路径（或表）
     images_root: 图像根目录
@@ -65,24 +159,22 @@ class COCODataset(FileAnnotationDataset):
     """
     def __init__(
         self,
-        annotation_file,
+        annotation_file: str,
         images_root: str,
-        tasks: list = ['bbox'], # 支持 'bbox','mask','segmentation','keypoints'
-        box_format: str = 'yolo', # 'yolo' | 'pascal' | 'coco'
+        img_size: int = 640,
+        tasks: list = ['bbox'],
+        box_format: str = 'yolo',
         min_area: float = 10.0,
         ignore_crowd: bool = True,
-        transforms_img = None, # 图像级变换
-        transforms_target = None, # 目标级变换回调
-        multiscale: bool = False, # 多尺度训练
-        mixup_mosaic: bool = False, # MixUp/Mosaic 占位
+        transforms_img=common_aug,
+        transforms_target=None,
+        multiscale: bool = False,
+        mixup_mosaic: bool = False,
         cache_images: bool = False
     ):
-        """
-        annotation_file: COCO JSON 文件或文件列表
-        images_root: 图像存放根目录
-        """
         self.images_root = Path(images_root)
-        self.tasks = tasks
+        self.img_size = img_size
+        self.tasks = set(tasks)
         self.box_format = box_format
         self.min_area = min_area
         self.ignore_crowd = ignore_crowd
@@ -91,97 +183,186 @@ class COCODataset(FileAnnotationDataset):
         self.multiscale = multiscale
         self.mixup_mosaic = mixup_mosaic
         self.cache_images = cache_images
-        # 解析 COCO JSON，得到 raw 样本列表
-        raws = self._parse_coco(annotation_file)
-        super().__init__(raws, load_fun=lambda x: raws)  # 利用父类加载 samples
-        # 可选：缓存图像到内存
-        if cache_images:
-            self._cache = [self._load_image(r) for r in raws]
-        else:
-            self._cache = [None] * len(self.samples)
 
-    def _parse_coco(self, json_path):
-        data = json.load(open(json_path))
-        # 连续类别映射
-        cat_map = {c['id']: i for i, c in enumerate(data['categories'])}
-        # 注释按 image_id 分组
-        ann_index = defaultdict(list)
+        with open(annotation_file) as f:
+            data = json.load(f)
+        self.cat_map = {c['id']: i for i, c in enumerate(data['categories'])}
+        ann_index = {}
+        for img in data['images']:
+            ann_index[img['id']] = []
         for ann in data['annotations']:
             if self.ignore_crowd and ann.get('iscrowd', 0):
                 continue
-            if ann['bbox'][2] * ann['bbox'][3] < self.min_area:
-                continue  # 小面积过滤
-            ann_index[ann['image_id']].append(ann)
-        # 生成 raw 列表
-        raws = []
-        for img in data['images']:
-            imgs_anns = ann_index.get(img['id'], [])
-            if not imgs_anns:
+            x, y, w, h = ann['bbox']
+            if w * h < self.min_area:
                 continue
-            raws.append({
+            ann_index[ann['image_id']].append(ann)
+
+        self.samples = []
+        for img in data['images']:
+            anns = ann_index[img['id']]
+            if not anns:
+                continue
+            self.samples.append({
                 'file_name': img['file_name'],
                 'width': img['width'],
                 'height': img['height'],
-                'anns': imgs_anns,
-                'cat_map': cat_map
+                'anns': anns
             })
-        return raws
 
-    def _load_image(self, raw):
-        path = self.images_root / raw['file_name']
-        return Image.open(path).convert('RGB')
+        if cache_images:
+            self._cache = [self._load_image(s) for s in self.samples]
+        else:
+            self._cache = [None] * len(self.samples)
 
-    def _get_raw(self, idx):
-        return self.samples[idx]
-
-    def _len(self):
+    def __len__(self):
         return len(self.samples)
 
-    def _get_sample(self, raw):
-        # 加载或取缓存图像
-        idx = self.samples.index(raw)
-        img = self._cache[idx] if self.cache_images else self._load_image(raw)
-        w, h = raw['width'], raw['height']
-        # 可选多尺度
-        if self.multiscale:
-            new_size = np.random.choice([320, 416, 512, 608])
-            img = img.resize((new_size, new_size), Image.BILINEAR)
-            scale_x, scale_y = new_size / w, new_size / h
-        else:
-            scale_x = scale_y = 1.0
-        # 标签
-        target = {}
-        # 1. 边界框
-        if 'bbox' in self.tasks:
-            boxes = []
-            for ann in raw['anns']:
-                x, y, bw, bh = ann['bbox']
-                # 转为所需格式
-                # 采用归一化的中心坐标和宽高，值域在 [0,1] 之间
-                if self.box_format == 'yolo':
-                    cx = (x + bw/2) / w
-                    cy = (y + bh/2) / h
-                    boxes.append([raw['cat_map'][ann['category_id']], cx, cy, bw/w, bh/h])
-                # 使用绝对像素的左上角和右下角坐标 [x_min, y_min, x_max, y_max]
-                elif self.box_format == 'pascal':
-                    boxes.append([x, y, x+bw, y+bh, raw['cat_map'][ann['category_id']]])
-                # 使用绝对像素的左上角坐标加上宽高 [x_min, y_min, w, h]
-                else:  # coco
-                    boxes.append([x, y, bw, bh, raw['cat_map'][ann['category_id']]])
-            target['boxes'] = np.array(boxes, dtype=np.float32)
-        # 2. Mask 多边形或 RLE
-        if 'mask' in self.tasks and 'segmentation' in raw['anns'][0]:
-            masks = [ann['segmentation'] for ann in raw['anns']]
-            target['masks'] = masks  # 用户可在 transforms_target 中进一步处理
-        # 3. 关键点
-        if 'keypoints' in self.tasks and 'keypoints' in raw['anns'][0]:
-            kps = [ann['keypoints'] for ann in raw['anns']]
-            target['keypoints'] = kps
-        # 应用用户定义的目标变换
-        if self.transforms_target:
-            img, target = self.transforms_target(img, target)
-        # 应用图像级变换
-        if self.transforms_img:
-            img = self.transforms_img(img)
+    def _load_image(self, sample):
+        path = self.images_root / sample['file_name']
+        img = cv2.imread(str(path))
+        if img is None:
+            raise FileNotFoundError(f"Cannot load {path}")
+        return img
 
-        return {'image': img, 'target': target}
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+
+        size = (np.random.choice([self.img_size, self.img_size // 2, self.img_size * 2])
+                if self.multiscale else self.img_size)
+
+        img0 = self._cache[idx] if self.cache_images else self._load_image(sample)
+        h0, w0 = img0.shape[:2]
+
+        # 获取原始边界框
+        bboxes, class_ids, masks, keypoints = [], [], [], []
+        for ann in sample['anns']:
+            x, y, w, h = ann['bbox']
+            bboxes.append([x, y, w, h])
+            class_ids.append(self.cat_map[ann['category_id']])
+            if 'segmentation' in ann and 'mask' in self.tasks:
+                mask = np.zeros((h0, w0), dtype=np.uint8)
+                for poly in ann['segmentation']:
+                    pts = np.array(poly).reshape(-1, 2).astype(np.int32)
+                    cv2.fillPoly(mask, [pts], 1)
+                masks.append(mask)
+            if 'keypoints' in ann and 'keypoints' in self.tasks:
+                pts = np.array(ann['keypoints']).reshape(-1, 3)[:, :2]
+                keypoints.append(pts.tolist())
+
+        # 应用 letterbox
+        img, (r, pad_w, pad_h) = letterbox(img0, size, color=(114, 114, 114))
+
+        # 调整边界框坐标
+        bboxes = np.array(bboxes)
+        bboxes[:, 0] = bboxes[:, 0] * r + pad_w  # x
+        bboxes[:, 1] = bboxes[:, 1] * r + pad_h  # y
+        bboxes[:, 2] = bboxes[:, 2] * r          # w
+        bboxes[:, 3] = bboxes[:, 3] * r          # h
+
+        # 转换为 YOLO 格式（cx, cy, w, h）并归一化
+        bboxes[:, 0] = bboxes[:, 0] + bboxes[:, 2] / 2  # cx
+        bboxes[:, 1] = bboxes[:, 1] + bboxes[:, 3] / 2  # cy
+        bboxes[:, 0] /= size
+        bboxes[:, 1] /= size
+        bboxes[:, 2] /= size
+        bboxes[:, 3] /= size
+
+        aug_kwargs = dict(image=img, bboxes=bboxes.tolist(), category_ids=class_ids)
+        if masks:
+            aug_kwargs['masks'] = masks
+        if keypoints:
+            aug_kwargs['keypoints'] = keypoints
+        aug = self.transforms_img(**aug_kwargs)
+
+        img_t = aug['image']
+        target = {}
+        if 'bbox' in self.tasks:
+            boxes_out = np.array(aug['bboxes'], dtype=np.float32)
+            if self.box_format == 'pascal':
+                xy = boxes_out[:, :2] - boxes_out[:, 2:] / 2
+                wh = boxes_out[:, 2:]
+                boxes_out = np.concatenate([xy, xy + wh], axis=1)
+            elif self.box_format == 'coco':
+                boxes_out = np.concatenate([
+                    (boxes_out[:, :2] - boxes_out[:, 2:] / 2) * [size, size],
+                    boxes_out[:, 2:] * [size, size]
+                ], axis=1)
+            target['boxes'] = torch.tensor(boxes_out)
+            target['labels'] = torch.tensor(aug['category_ids'], dtype=torch.long)
+
+        if 'mask' in self.tasks and masks:
+            target['masks'] = torch.stack([torch.tensor(m, dtype=torch.uint8) for m in aug['masks']])
+
+        if 'keypoints' in self.tasks and keypoints:
+            target['keypoints'] = torch.tensor(aug['keypoints'], dtype=torch.float32)
+
+        if self.transforms_target:
+            pil = Image.fromarray(cv2.cvtColor(img_t.permute(1, 2, 0).cpu().numpy(), cv2.COLOR_BGR2RGB))
+            pil, target = self.transforms_target(pil, target)
+            img_t = torch.from_numpy(np.array(pil)[:, :, ::-1]).permute(2, 0, 1)
+
+        return {'image': img_t, 'target': target}
+    
+    def get_vis_sample(self, idx, apply_aug=True, show_boxes=True):
+        """
+        获取用于可视化的样本图像及其标注信息。
+        
+        参数：
+            idx (int): 样本索引。
+            apply_aug (bool): 是否应用数据增强。
+            show_boxes (bool): 是否在图像上绘制边界框。
+        
+        返回：
+            vis_np (np.ndarray): 可视化图像（RGB格式）。
+            vis_info (dict): 包含边界框和标签的字典。
+        """
+        def denormalize(image, mean, std):
+            mean = np.array(mean).reshape(3, 1, 1)
+            std = np.array(std).reshape(3, 1, 1)
+            return (image * std + mean).clip(0, 1)
+
+        # 获取归一化后的图像和目标信息
+        sample = self.__getitem__(idx)
+        img_t = sample['image']  # Tensor, shape: (3, H, W)
+        target = sample['target']
+        boxes = target['boxes'].cpu().numpy()  # shape: (N, 4)
+        labels = target['labels'].cpu().numpy()
+
+        # 获取原始图像尺寸
+        sample_meta = self.samples[idx]
+        h0, w0 = sample_meta['height'], sample_meta['width']
+
+        # 反归一化图像
+        vis_np = img_t.cpu().numpy()
+        vis_np = denormalize(vis_np, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+        vis_np = np.transpose(vis_np, (1, 2, 0))  # CHW -> HWC
+        vis_np = (vis_np * 255).astype(np.uint8)
+
+        # 将图像从BGR转换为RGB（如果需要）
+        vis_np = cv2.cvtColor(vis_np, cv2.COLOR_BGR2RGB)
+
+        # 绘制边界框
+        if show_boxes and boxes.size > 0:
+            for box in boxes:
+                if self.box_format == 'yolo':
+                    # YOLO格式: [cx, cy, w, h]，归一化
+                    cx, cy, w, h = box
+                    x1 = int((cx - w / 2) * vis_np.shape[1])
+                    y1 = int((cy - h / 2) * vis_np.shape[0])
+                    x2 = int((cx + w / 2) * vis_np.shape[1])
+                    y2 = int((cy + h / 2) * vis_np.shape[0])
+                elif self.box_format == 'pascal':
+                    # Pascal VOC格式: [xmin, ymin, xmax, ymax]
+                    x1, y1, x2, y2 = box.astype(int)
+                elif self.box_format == 'coco':
+                    # COCO格式: [xmin, ymin, w, h]
+                    x1, y1, w_box, h_box = box
+                    x2 = int(x1 + w_box)
+                    y2 = int(y1 + h_box)
+                    x1, y1 = int(x1), int(y1)
+                else:
+                    raise ValueError(f"Unsupported box format: {self.box_format}")
+                cv2.rectangle(vis_np, (x1, y1), (x2, y2), color=(0, 255, 0), thickness=2)
+
+        return vis_np, {'boxes': boxes, 'labels': labels}
