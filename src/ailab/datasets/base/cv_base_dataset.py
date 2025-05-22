@@ -170,7 +170,8 @@ class COCODataset:
         transforms_target=None,
         multiscale: bool = False,
         mixup_mosaic: bool = False,
-        cache_images: bool = False
+        cache_images: bool = False,
+        return_orig: bool = False
     ):
         self.images_root = Path(images_root)
         self.img_size = img_size
@@ -183,6 +184,7 @@ class COCODataset:
         self.multiscale = multiscale
         self.mixup_mosaic = mixup_mosaic
         self.cache_images = cache_images
+        self.return_orig = return_orig
 
         with open(annotation_file) as f:
             data = json.load(f)
@@ -301,6 +303,15 @@ class COCODataset:
             pil = Image.fromarray(cv2.cvtColor(img_t.permute(1, 2, 0).cpu().numpy(), cv2.COLOR_BGR2RGB))
             pil, target = self.transforms_target(pil, target)
             img_t = torch.from_numpy(np.array(pil)[:, :, ::-1]).permute(2, 0, 1)
+        
+        if self.return_orig and 'bbox' in self.tasks:
+            orig_boxes = []
+            for ann in sample['anns']:
+                # COCO 原始格式 [xmin, ymin, w, h]
+                x, y, w, h = ann['bbox']
+                # 转成 [x1, y1, x2, y2]
+                orig_boxes.append([x, y, x + w, y + h])
+            target['orig_boxes'] = torch.tensor(orig_boxes, dtype=torch.float32)
 
         return {'image': img_t, 'target': target}
     
