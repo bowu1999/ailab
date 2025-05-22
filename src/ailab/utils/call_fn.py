@@ -23,7 +23,7 @@ class OutputWrapper(nn.Module):
             # 规范化输出为 dict
             if isinstance(out, dict):
                 return out
-            if isinstance(out, (tuple, list)):
+            if isinstance(out, (tuple)):
                 return dict(zip(self.output_keys, out))
             return {self.output_keys[0]: out}
 
