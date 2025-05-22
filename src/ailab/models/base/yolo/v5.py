@@ -107,8 +107,9 @@ class Detect(nn.Module):
         self.no = nc + 5
         self.na = len(anchors[0]) // 2
         self.nl = len(anchors)
-        self.stride = torch.tensor(strides)
-        self.anchors = torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2)
+        # 关键修改：把这两个改为 buffer
+        self.register_buffer('anchors',  torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2))
+        self.register_buffer('stride',  torch.tensor(strides, dtype=torch.float32))
         self.grid = [torch.zeros(1)] * self.nl
         self.m = nn.ModuleList(
             nn.Conv2d(ch[i], self.no * self.na, 1) for i in range(self.nl)
@@ -131,7 +132,7 @@ class Detect(nn.Module):
                 )
                 self.grid[i] = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float().to(p.device)
             # 解码过程，仅用于推理
-            psig = p.sigmoid()
+            psig = p.sigmoid().clone()
             xy = (psig[..., :2] * 2 - 0.5 + self.grid[i]) * self.stride[i]
             wh = (psig[..., 2:4] * 2) ** 2 * self.anchors[i].view(1, self.na, 1, 1, 2)
             conf = psig[..., 4:5]
@@ -148,8 +149,10 @@ class Detect(nn.Module):
 # YOLOv5 Model
 # --------------------------------------------
 class YOLOv5(nn.Module):
-    def __init__(self, nc=80, anchors=(), ch=(64,128,256,512,1024), strides=(8,16,32)):
+    def __init__(self, nc=80, anchors=(), ch=(64,128,256,512,1024), strides=(8,16,32), conf_thres=0.25, iou_thres=0.45):
         super().__init__()
+        self.conf_thres = conf_thres
+        self.iou_thres = iou_thres
         # Stem
         self.stem = Focus(3, ch[0], k=3, s=1)
         # Backbone
@@ -189,7 +192,35 @@ class YOLOv5(nn.Module):
         N3  = self.c3_N3(self.concat([self.down1(P3), P4]))
         N4  = self.c3_N4(self.concat([self.down2(N3), P5]))
         # Detect
-        return self.detect([P3, N3, N4])
+        out = self.detect([P3, N3, N4])
+        # 训练模式直接返回 raw/decoded，由 Detect 控制
+        if self.training:
+            return out
+        # 推理模式：对 decoded 输出做 NMS 合并三层
+        from torchvision.ops import nms
+        preds = []
+        for p in out:
+            bs, na, ny, nx, no = p.shape
+            preds.append(p.view(bs, -1, no))
+        preds = torch.cat(preds, dim=1)  # (bs, num_pred, 5nc)
+
+        results = []
+        for xi in preds:  # 逐图处理
+            # 取框和得分
+            boxes  = xi[..., :4]                    # x1,y1,x2,y2
+            obj    = xi[..., 4:5]                   # objectness
+            cls_p  = xi[..., 5:]                    # class probs
+            scores, labels = (obj * cls_p).max(1)   # 联合得分与类别
+
+            # 过滤低置信
+            mask = scores > self.conf_thres
+            boxes, scores, labels = boxes[mask], scores[mask], labels[mask]
+
+            # NMS
+            keep = nms(boxes, scores, self.iou_thres)
+            results.append((boxes[keep], scores[keep], labels[keep]))
+
+        return results
 
 
 if __name__ == '__main__':
