@@ -17,6 +17,8 @@ from ailab.utils import call_fn, OutputWrapper
 
 def ailab_train(cfg):
     """基于配置文件的训练接口。"""
+    # 启用异常检测，找到 in-place 操作的源头
+    torch.autograd.set_detect_anomaly(True)
     os.makedirs(cfg['work_dir'], exist_ok = True)
 
     # 初始化分布式环境（返回是否分布式训练）
