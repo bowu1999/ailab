@@ -192,7 +192,8 @@ class WorkFlow:
                 self.last_loss = loss.item() if hasattr(loss, 'item') else loss
                 # 反向 & 优化
                 self.optimizer.zero_grad()
-                loss.backward()
+                with torch.autograd.set_detect_anomaly(True):
+                    loss.backward()
                 self.optimizer.step()
                 # 样本统计
                 bs = get_batch_size(self.last_data)
