@@ -215,7 +215,7 @@ def grouped_strip_plot(
     plot_fields,
     target_group_idx=0,
     figsize=(12, 6),
-    gap=10
+    gap=50
 ):
     """
     按照指定字段分组，组内排序，绘制指定组的多个字段在统一横轴、不同纵轴上的图。
@@ -264,6 +264,6 @@ def grouped_strip_plot(
     plt.xlabel("Index (sorted by field)", fontsize=12)
     plt.title(f"Group: {group_key}", fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.5)
-    plt.legend()
+    plt.legend(bbox_to_anchor=(1.01, 1), loc='upper left')  # 图例放到绘图框外
     plt.tight_layout()
     plt.show()
