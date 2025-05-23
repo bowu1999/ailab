@@ -206,3 +206,64 @@ def display_image_from_cv2(image):
     plt.title('Image loaded with OpenCV and displayed using Matplotlib')
     plt.axis('off')  # 不显示坐标轴
     plt.show()
+
+
+def grouped_strip_plot(
+    df,
+    group_by_fields,
+    sort_by_field,
+    plot_fields,
+    target_group_idx=0,
+    figsize=(12, 6),
+    gap=10
+):
+    """
+    按照指定字段分组，组内排序，绘制指定组的多个字段在统一横轴、不同纵轴上的图。
+    横轴为排序后的序号（从1开始），纵轴为各字段数值加上偏移量。
+
+    Parameters:
+        df: DataFrame 原始数据
+        group_by_fields: list[str] 用于分组的列
+        sort_by_field: str 组内排序字段
+        plot_fields: list[str] 要绘制的字段（同一组中的多个字段）
+        target_group_idx: int 要绘制的组索引
+        figsize: tuple 绘图大小
+        gap: int 各字段之间纵轴间距
+    """
+    grouped = list(df.groupby(group_by_fields))
+
+    if target_group_idx >= len(grouped):
+        raise IndexError("指定的组索引超出了可用范围")
+
+    group_key, group_df = grouped[target_group_idx]
+    group_df = group_df.sort_values(by=sort_by_field).reset_index(drop=True)
+
+    x = np.arange(1, len(group_df) + 1)  # 横轴为序号
+    n_fields = len(plot_fields)
+
+    plt.figure(figsize=figsize)
+
+    yticks = []
+    yticklabels = []
+
+    for i, field in enumerate(plot_fields):
+        y_offset = i * gap
+        y = group_df[field].values + y_offset
+        plt.plot(x, y, label=field)
+
+        # 设置字段所在范围的中点作为 ytick
+        yticks.append(np.median(group_df[field].values) + y_offset)
+        yticklabels.append(field)
+
+        # 添加数据点注释
+        for xi, yi in zip(x[::max(1, len(x)//20)], y[::max(1, len(y)//20)]):
+            plt.text(xi, yi, f"{yi - y_offset:.1f}", fontsize=6, ha='center')
+
+    plt.xticks(x[::max(1, len(x)//20)])  # 控制横轴刻度密度
+    plt.yticks(yticks, yticklabels)
+    plt.xlabel("Index (sorted by field)", fontsize=12)
+    plt.title(f"Group: {group_key}", fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
