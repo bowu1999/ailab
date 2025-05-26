@@ -212,13 +212,60 @@ class CheckpointHook(Hook):
 
 
 class ResumeHook(Hook):
-    def __init__(self, cfg): 
+    """
+    断点重启并可选重置学习率：
+      resume_from:        checkpoint 路径（None 则不 resume）
+      resume_lr:          'keep'|'initial'|float
+           - 'keep'    : 保留 checkpoint 中的 lr
+           - 'initial' : 恢复到程序启动前 optimizer.param_groups 中最初的 lr
+           - float     : 用这个数值覆盖所有 param_group 的 lr
+      lr_scheduler_name:  如果有 LR Scheduler，需要同步 last_epoch，可传其 name
+    """
+    def __init__(self, cfg):
         self.resume_path = cfg.get('resume_from', None)
+        self.resume_lr   = cfg.get('resume_lr', 'keep')
+        self.sched_name  = cfg.get('lr_scheduler_name', None)
 
     def before_run(self, wf):
-        if self.resume_path:
-            epoch = Checkpointer(wf.work_dir).resume(wf.model, wf.optimizer, self.resume_path)
-            wf.epoch = epoch
+        if not self.resume_path:
+            return
+
+        # 1. 在 resume 之前，先把当前 optimizer 的 lr 备份一份
+        init_lrs = [pg['lr'] for pg in wf.optimizer.param_groups]
+
+        # 2. 恢复 checkpoint （只返回 epoch 或 (epoch, ckpt_dict)）
+        ret = Checkpointer(wf.work_dir).resume(
+            wf.model, wf.optimizer, self.resume_path
+        )
+        if isinstance(ret, tuple):
+            epoch, _ = ret
+        else:
+            epoch = ret
+        wf.epoch = epoch
+
+        # 3. 根据 resume_lr 决定是否覆盖 lr
+        if isinstance(self.resume_lr, (float, int)):
+            new_lr = float(self.resume_lr)
+            for pg in wf.optimizer.param_groups:
+                pg['lr'] = new_lr
+
+        elif self.resume_lr == 'initial':
+            # 用最开始备份的 init_lrs
+            for pg, lr in zip(wf.optimizer.param_groups, init_lrs):
+                pg['lr'] = lr
+
+        elif self.resume_lr == 'keep':
+            # 什么都不做，checkpoint 自带的 lr 就在 optimizer 里
+            pass
+
+        else:
+            raise ValueError(f"Unsupported resume_lr: {self.resume_lr!r}")
+
+        # 4. 如果有 scheduler，也同步它的 last_epoch
+        if self.sched_name and hasattr(wf, 'lr_schedulers'):
+            sched = wf.lr_schedulers.get(self.sched_name, None)
+            if sched is not None:
+                sched.last_epoch = wf.epoch
 
 
 class LrSchedulerHook(Hook):
