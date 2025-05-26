@@ -1,170 +1,159 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision.ops import generalized_box_iou
 
-from ._base import LabBaseLoss
 
+class YOLOv5Loss(nn.Module):
+    def __init__(self, anchors, strides, num_classes, hyp, debug=False):
+        super().__init__()
+        # ---- 省略原 init 中初始化锚点、超参等 ----
+        anchors = torch.tensor(anchors, dtype=torch.float32)
+        if anchors.ndimension() == 2 and anchors.shape[1] == 6:
+            anchors = anchors.view(anchors.shape[0], -1, 2)
+        assert anchors.ndimension() == 3 and anchors.shape[2] == 2
+        self.anchors = anchors
+        self.strides = torch.tensor(strides, dtype=torch.float32)
+        self.nc = num_classes
+        self.nl = anchors.shape[0]
+        self.na = anchors.shape[1]
+        self.hyp = hyp
+        self.balance = [4.0,1.0,0.4] if self.nl==3 else [1.0]*self.nl
+        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([hyp.get("cls_pw",1.0)]))
+        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([hyp.get("obj_pw",1.0)]))
+        # debug flag
+        self.debug = debug
+        self._debug_done = False
 
-class YOLONormalizedLoss(LabBaseLoss):
-    """
-    改进版 YOLO 损失，支持多尺度 anchor 匹配 + CIoU
-    输入：
-        anchors: list of per-scale anchor lists, e.g.
-                 [[10,13,16,30,33,23], [30,61,62,45,59,119], ...]
-        strides: list/tuple of strides 对应每个尺度, e.g. (8,16,32)
-        nc:       类别数
-        lambda_box, lambda_obj, lambda_cls: 各损失项权重
-        iou_threshold: 负样本 IoU 忽略阈值
-        use_ciou: 是否启用 CIoU
-    """
-    def __init__(
-        self,
-        anchors,
-        strides,
-        nc = 80,
-        lambda_box = 5.0,
-        lambda_obj = 1.0,
-        lambda_cls = 1.0,
-        iou_threshold = 0.5,
-        use_ciou = True
-    ):
-        super().__init__(
-            nc = nc,
-            lambda_box=lambda_box,
-            lambda_obj=lambda_obj,
-            lambda_cls=lambda_cls
-        )
-        self.nc = nc
-        self.lb = lambda_box
-        self.lo = lambda_obj
-        self.lc = lambda_cls
-        self.use_ciou = use_ciou
-        self.iou_threshold = iou_threshold
-        # (nl, na, 2)
-        self.register_buffer('anchors', torch.tensor(anchors, dtype=torch.float32).view(len(anchors), -1, 2))
-        self.register_buffer('strides', torch.tensor(strides, dtype=torch.float32))
-        # 损失函数
-        self.mse_loss = nn.MSELoss(reduction='sum')
-        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
+    def forward(self, preds, targets):
+        device = preds[0].device
+        # 第一次进来打一下 targets 原样
+        if self.debug and not self._debug_done:
+            print(">>> [Loss] raw targets list:")
+            for i, t in enumerate(targets):
+                print(f"  img {i}: shape={t.shape}, values=\n{t}")
+        # ensure on device
+        targets = [t.to(device) for t in targets]
+        # build targets
+        tcls, tbox, indices, anch = self.build_targets(preds, targets, device)
+        # loss 初始化
+        loss = torch.zeros(3, device=device)
+
+        # 打印 build_targets 的 key 信息（仅一次）
+        if self.debug and not self._debug_done:
+            print(">>> [Loss] after build_targets:")
+            for lvl, (cls_i, box_i, idx_i) in enumerate(zip(tcls, tbox, indices)):
+                print(f"  level {lvl}: matched instances = {cls_i.shape[0]}")
+            self._debug_done = True
+
+        # 原有的 loss 计算逻辑（略微格式化）
+        for i, pi in enumerate(preds):
+            b, a, gj, gi = indices[i]
+            tobj = torch.zeros_like(pi[...,0], device=device)
+            n = b.shape[0]
+            if n:
+                # box loss
+                pxy = pi[b,a,gj,gi,0:2].sigmoid()
+                pwh = pi[b,a,gj,gi,2:4].sigmoid()
+                pbox = torch.cat((pxy, pwh),1)
+                giou = self.bbox_giou(pbox, tbox[i])
+                loss[0] += (1.0-giou).mean()
+                # obj loss 标签
+                tobj[b,a,gj,gi] = giou.detach().clamp(0)
+                # cls loss
+                if self.nc > 1:
+                    pred_cls = pi[b,a,gj,gi,5:]
+                    t = torch.zeros_like(pred_cls, device=device)
+                    tcls_i = tcls[i].to(device)
+                    idx = torch.arange(n, device=device)
+                    t[idx, tcls_i] = 1.0
+                    loss[2] += self.BCEcls(pred_cls, t)
+            # obj loss
+            loss[1] += self.BCEobj(pi[...,4], tobj) * self.balance[i]
+
+        # 加权
+        loss[0] *= self.hyp['box']
+        loss[1] *= self.hyp['obj']
+        loss[2] *= self.hyp['cls']
+        return loss.sum()
+
+    def build_targets(self, preds, targets, device):
+        na, nl = self.na, self.nl
+        tcls, tbox, indices, anch = [], [], [], []
+        gain = torch.ones(7, device=device)
+
+        # 拼接所有 targets
+        targets_full = []
+        for i, t in enumerate(targets):
+            if t.numel():
+                img_idx = torch.full((t.size(0),1), i, device=device, dtype=t.dtype)
+                targets_full.append(torch.cat([img_idx, t],1))
+        if targets_full:
+            targets_tensor = torch.cat(targets_full,0)
+        else:
+            targets_tensor = torch.zeros((0,6), device=device)
+
+        # 再次 debug：打印 targets_tensor
+        if self.debug and not self._debug_done:
+            print(f">>> [build_targets] targets_tensor shape={targets_tensor.shape}")
+            print(targets_tensor)
+
+        # 为每个尺度分配
+        for i in range(nl):
+            anchors_i = self.anchors[i].to(device)
+            shape = preds[i].shape
+            gain[2:6] = torch.tensor(shape)[[2,3,2,3]].to(device)
+            if targets_tensor.numel():
+                # repeat & concat anchor idx
+                t = targets_tensor.repeat(na,1,1)
+                a = torch.arange(na,device=device).view(na,1).repeat(1,targets_tensor.size(0)).view(-1)
+                tt = torch.cat([t.view(-1,6), a.unsqueeze(1).float()],1)
+                # scale to grid
+                tt[:,2:6] *= gain[2:6]
+                # ratio with anchors
+                r = tt[:,4:6] / anchors_i[tt[:,6].long()]
+                r = torch.max(r, 1./r).max(1)[0]
+                # debug mask stats
+                if self.debug and not self._debug_done:
+                    print(f">>> [build_targets][level {i}] before mask {tt.size(0)}, r.min={r.min():.3f}, r.max={r.max():.3f}")
+                mask = r < 4.0
+                tt = tt[mask]
+                if self.debug and not self._debug_done:
+                    print(f">>> [build_targets][level {i}] after  mask {tt.size(0)}")
+                if tt.size(0):
+                    b = tt[:,0].long(); c = tt[:,1].long()
+                    gxy = tt[:,2:4]; gwh = tt[:,4:6]
+                    gij = gxy.long(); gi, gj = gij.t()
+                    indices.append((b, tt[:,6].long(), gj, gi))
+                    tbox.append(torch.cat((gxy-gij, gwh),1))
+                    anch.append(anchors_i[tt[:,6].long()])
+                    tcls.append(c)
+                    continue
+            # no targets for this level
+            indices.append((torch.zeros(0,device=device,dtype=torch.long),)*4)
+            tbox.append(torch.zeros((0,4),device=device))
+            anch.append(torch.zeros((0,2),device=device))
+            tcls.append(torch.zeros((0,),device=device,dtype=torch.long))
+
+        return tcls, tbox, indices, anch
 
     @staticmethod
-    def _sigmoid(x):
-        return x.sigmoid()
-
-    def decode_boxes(self, raw, grid, stride, anchor_wh):
+    def bbox_giou(pbox, tbox):
+        # unchanged
         """
-        将网络输出 raw(tx,ty,tw,th) 解码为 (x1,y1,x2,y2)
-        参数:
-            raw:        (M,4) tensor
-            grid:       (M,2) tensor: 每个预测对应的 (gi, gj)
-            stride:     标量
-            anchor_wh:  (M,2) tensor：每个预测对应的 anchor 宽高
-
-        返回: (M,4) x1,y1,x2,y2
+        pbox, tbox: (n,4)  格式都是 (cx,cy,w,h)
+        返回每对框的 GIoU diagonal
         """
-        tx, ty, tw, th = raw.unbind(1)
-        gi, gj = grid.unbind(1)
-        # 中心坐标
-        cx = (self._sigmoid(tx)*2 - 0.5 + gi) * stride
-        cy = (self._sigmoid(ty)*2 - 0.5 + gj) * stride
-        # 宽高
-        aw, ah = anchor_wh.unbind(1)
-        w = (self._sigmoid(tw)*2).pow(2) * aw
-        h = (self._sigmoid(th)*2).pow(2) * ah
-        # 转为 x1,y1,x2,y2
-        x1 = cx - w/2
-        y1 = cy - h/2
-        x2 = cx + w/2
-        y2 = cy + h/2
-        return torch.stack([x1, y1, x2, y2], dim=1)
+        # 转成 x1,y1,x2,y2
+        px = pbox[:, :2]
+        pw = pbox[:, 2:]
+        p1 = px - pw / 2
+        p2 = px + pw / 2
+        p_rect = torch.cat([p1, p2], 1)
 
-    def forward(self, pred, target):
-        device = pred[0].device
-        bs = pred[0].size(0)
+        tx = tbox[:, :2]
+        tw = tbox[:, 2:]
+        t1 = tx - tw / 2
+        t2 = tx + tw / 2
+        t_rect = torch.cat([t1, t2], 1)
 
-        # Convert target dict to tensor if needed
-        if isinstance(target, (list, tuple)) and isinstance(target[0], dict):
-            targets = []
-            for b in range(bs):
-                boxes = target[b]['boxes']
-                labels = target[b]['labels']
-                Ni = labels.size(0)
-                if Ni == 0:
-                    targets.append(torch.zeros((0,6), device=device))
-                    continue
-                idx = torch.full((Ni,1), b, device=device, dtype=torch.long)
-                cls = labels.unsqueeze(1).to(device)
-                tgt = torch.cat([idx.float(), cls.float(), boxes], dim=1)
-                targets.append(tgt)
-        else:
-            targets = target
-
-        l_box = torch.zeros(1, device=device)
-        l_obj = torch.zeros(1, device=device)
-        l_cls = torch.zeros(1, device=device)
-
-        for b in range(bs):
-            tb = targets[b]
-            if tb.numel() == 0:
-                for pi in pred:
-                    l_obj = l_obj + self.bce_loss(pi[b, ..., 4], torch.zeros_like(pi[b, ..., 4])).sum()
-                continue
-
-            for i, pi in enumerate(pred):
-                stride = self.strides[i]
-                anchors_i = self.anchors[i]
-                bs_i, na, ny, nx, no = pi.shape
-
-                p = pi[b].view(na*ny*nx, no).clone()
-                obj_pred = p[..., 4]
-                obj_target = torch.zeros_like(obj_pred)
-
-                gy, gx = torch.meshgrid(
-                    torch.arange(ny, device=device),
-                    torch.arange(nx, device=device),
-                    indexing='ij')
-                grid = torch.stack((gx, gy), dim=2).view(-1,2).float()
-                grid = grid.repeat(na, 1)
-                anchor_wh = anchors_i.repeat(ny*nx, 1)
-
-                l_obj = l_obj + self.bce_loss(obj_pred, obj_target).sum()
-
-                for gt in tb:
-                    cls, gx_n, gy_n, gw_n, gh_n = gt
-                    gi = int(gx_n * nx)
-                    gj = int(gy_n * ny)
-
-                    rel_wh = torch.tensor([gw_n * nx, gh_n * ny], device=device)
-                    ratios = (rel_wh / anchors_i).log().abs().sum(1)
-                    best_n = torch.argmin(ratios)
-
-                    idx = best_n * ny * nx + gj * nx + gi
-
-                    tx = gx_n*nx - gi
-                    ty = gy_n*ny - gj
-                    tw = torch.log((gw_n*nx) / anchors_i[best_n,0] + 1e-16)
-                    th = torch.log((gh_n*ny) / anchors_i[best_n,1] + 1e-16)
-                    target_raw = torch.stack([tx, ty, tw, th], dim=0).to(device)
-
-                    if self.use_ciou:
-                        pred_raw = p[idx, 0:4].unsqueeze(0)
-                        true_raw = target_raw.unsqueeze(0)
-                        pred_box = self.decode_boxes(pred_raw, grid[idx:idx+1], stride, anchor_wh[idx:idx+1])
-                        true_box = self.decode_boxes(true_raw, grid[idx:idx+1], stride, anchor_wh[idx:idx+1])
-                        giou = generalized_box_iou(pred_box, true_box).diag().clamp(-1+1e-7, 1-1e-7)
-                        l_box = l_box + (1 - giou).sum()
-                    else:
-                        l_box = l_box + self.mse_loss(p[idx, 0:4], target_raw)
-
-                    # obj_target[idx] = 1.0
-                    index = best_n * ny * nx + gj * nx + gi  # 这里要确保 index 是 1D tensor
-                    obj_target = obj_target.scatter(0, index, 1.0)
-                    l_obj = l_obj + self.bce_loss(obj_pred, obj_target).sum()
-
-                    cls_target = torch.zeros((self.nc,), device=device)
-                    cls_target[int(cls)] = 1.0
-                    l_cls = l_cls + self.bce_loss(p[idx,5:], cls_target).sum()
-
-        loss = (self.lb * l_box + self.lo * l_obj + self.lc * l_cls) / bs
-        return loss
+        return generalized_box_iou(p_rect, t_rect).diagonal()
