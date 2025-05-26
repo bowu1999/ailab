@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torchvision.ops import generalized_box_iou, nms
 
 
 # --------------------------------------------
@@ -108,8 +109,8 @@ class Detect(nn.Module):
         self.na = len(anchors[0]) // 2
         self.nl = len(anchors)
         # 关键修改：把这两个改为 buffer
-        self.register_buffer('anchors',  torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2))
-        self.register_buffer('stride',  torch.tensor(strides, dtype=torch.float32))
+        self.register_buffer('anchors', torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2))
+        self.register_buffer('stride', torch.tensor(strides, dtype=torch.float32))
         self.grid = [torch.zeros(1)] * self.nl
         self.m = nn.ModuleList(
             nn.Conv2d(ch[i], self.no * self.na, 1) for i in range(self.nl)
@@ -128,7 +129,7 @@ class Detect(nn.Module):
                 yv, xv = torch.meshgrid(
                     torch.arange(ny, device=p.device),
                     torch.arange(nx, device=p.device),
-                    indexing = 'ij'
+                    indexing='ij'
                 )
                 self.grid[i] = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float().to(p.device)
             # 解码过程，仅用于推理
@@ -149,7 +150,15 @@ class Detect(nn.Module):
 # YOLOv5 Model
 # --------------------------------------------
 class YOLOv5(nn.Module):
-    def __init__(self, nc=80, anchors=(), ch=(64,128,256,512,1024), strides=(8,16,32), conf_thres=0.25, iou_thres=0.45):
+    def __init__(
+        self,
+        nc = 80,
+        anchors = (),
+        ch = (64, 128, 256, 512, 1024),
+        strides = (8, 16, 32),
+        conf_thres = 0.25,
+        iou_thres = 0.45
+    ):
         super().__init__()
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
@@ -166,15 +175,15 @@ class YOLOv5(nn.Module):
         self.conv_P5 = Conv(ch[4], ch[3], 1, 1)
         self.conv_P4 = Conv(ch[3], ch[2], 1, 1)
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.concat   = Concat(1)
-        self.c3_P5    = C3(ch[3]*2, ch[3], n=3, shortcut=False)
-        self.c3_P4    = C3(ch[2]*2, ch[2], n=3, shortcut=False)
-        self.down1    = Conv(ch[2], ch[2], 3, 2)
-        self.down2    = Conv(ch[3], ch[3], 3, 2)
-        self.c3_N3    = C3(ch[2]+ch[3], ch[3], n=3, shortcut=False)
-        self.c3_N4    = C3(ch[3]+ch[4], ch[4], n=3, shortcut=False)
+        self.concat = Concat(1)
+        self.c3_P5 = C3(ch[3]*2, ch[3], n=3, shortcut=False)
+        self.c3_P4 = C3(ch[2]*2, ch[2], n=3, shortcut=False)
+        self.down1 = Conv(ch[2], ch[2], 3, 2)
+        self.down2 = Conv(ch[3], ch[3], 3, 2)
+        self.c3_N3 = C3(ch[2]+ch[3], ch[3], n=3, shortcut=False)
+        self.c3_N4 = C3(ch[3]+ch[4], ch[4], n=3, shortcut=False)
         # Head
-        self.detect = Detect(nc, anchors, ch=[ch[2],ch[3],ch[4]], strides=strides)
+        self.detect = Detect(nc, anchors, ch=[ch[2], ch[3], ch[4]], strides=strides)
 
     def forward(self, x):
         # Stem + Backbone
@@ -185,52 +194,50 @@ class YOLOv5(nn.Module):
         x = self.backbone[6](x); x = self.backbone[7](x); P5 = x
         # PANet Top-Down
         P5u = self.upsample(self.conv_P5(P5))
-        P4  = self.c3_P5(self.concat([P5u, P4]))
+        P4 = self.c3_P5(self.concat([P5u, P4]))
         P4u = self.upsample(self.conv_P4(P4))
-        P3  = self.c3_P4(self.concat([P4u, P3]))
+        P3 = self.c3_P4(self.concat([P4u, P3]))
         # PANet Bottom-Up
-        N3  = self.c3_N3(self.concat([self.down1(P3), P4]))
-        N4  = self.c3_N4(self.concat([self.down2(N3), P5]))
+        N3 = self.c3_N3(self.concat([self.down1(P3), P4]))
+        N4 = self.c3_N4(self.concat([self.down2(N3), P5]))
         # Detect
         out = self.detect([P3, N3, N4])
         # 训练模式直接返回 raw/decoded，由 Detect 控制
         if self.training:
             return out
         # 推理模式：对 decoded 输出做 NMS 合并三层
-        from torchvision.ops import nms
+         # 1) 将三个尺度展平成 (bs, num_preds, no)
         preds = []
         for p in out:
             bs, na, ny, nx, no = p.shape
             preds.append(p.view(bs, -1, no))
-        preds = torch.cat(preds, dim=1)  # (bs, num_pred, 5nc)
+        preds = torch.cat(preds, dim=1)  # (bs, N, 5+nc)
 
         results = []
-        for xi in preds:  # 逐图处理
-            # 取框和得分
-            boxes  = xi[..., :4]                    # x1,y1,x2,y2
-            obj    = xi[..., 4:5]                   # objectness
-            cls_p  = xi[..., 5:]                    # class probs
-            scores, labels = (obj * cls_p).max(1)   # 联合得分与类别
+        for pi in preds:  # pi: (N, 5+nc)
+            # 2) 取出 xywh、conf、cls_prob
+            xy = pi[:, :2]
+            wh = pi[:, 2:4]
+            conf = pi[:, 4]               # already sigmoid 过
+            cls_p = pi[:, 5:]             # already sigmoid 过
 
-            # 过滤低置信
+            # 3) 从 [cx,cy,w,h] 转到 [x1,y1,x2,y2]
+            x1 = xy[:, 0] - wh[:, 0] / 2
+            y1 = xy[:, 1] - wh[:, 1] / 2
+            x2 = xy[:, 0] + wh[:, 0] / 2
+            y2 = xy[:, 1] + wh[:, 1] / 2
+            boxes = torch.stack([x1, y1, x2, y2], dim=1)
+
+            # 4) 组合得分并过滤
+            scores, labels = (conf.unsqueeze(1) * cls_p).max(1)
             mask = scores > self.conf_thres
             boxes, scores, labels = boxes[mask], scores[mask], labels[mask]
 
-            # NMS
-            keep = nms(boxes, scores, self.iou_thres)
-            results.append((boxes[keep], scores[keep], labels[keep]))
+            # 5) NMS
+            if boxes.numel():
+                keep = nms(boxes, scores, self.iou_thres)
+                boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
 
-        return results
+            results.append((boxes, scores, labels))
 
-
-if __name__ == '__main__':
-    anchors = [
-        [10,13, 16,30, 33,23],
-        [30,61, 62,45, 59,119],
-        [116,90, 156,198, 373,326],
-    ]
-    model = YOLOv5(nc=80, anchors=anchors)
-    x = torch.randn(1,3,640,640)
-    outs = model(x)
-    for o in outs:
-        print(o.shape)
+        return results, out
