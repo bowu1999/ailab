@@ -57,74 +57,110 @@ class ClassificationImageDataset(FileAnnotationDataset, ClassificationTask):
         return int(raw[self.y_key])
 
 
-# 定义数据增强流程
+# # 定义数据增强流程
+# common_aug = A.Compose(
+#     [
+#         # 将图像的最长边缩放到不超过640，保持宽高比
+#         A.LongestMaxSize(max_size=640),
+#         # 如果图像尺寸小于640x640，则进行填充，使用常数值填充（黑色）
+#         A.PadIfNeeded(min_height=640, min_width=640, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
+#         # 以50%的概率随机裁剪512x512的区域
+#         A.RandomCrop(height=512, width=512, p=0.5),
+#         # 以50%的概率进行水平翻转
+#         A.HorizontalFlip(p=0.5),
+#         # 以20%的概率进行垂直翻转
+#         A.VerticalFlip(p=0.2),
+#         # 以30%的概率进行仿射变换，包括平移、缩放和旋转
+#         A.Affine(
+#             translate_percent=0.05,  # 平移范围为±5%
+#             scale=(0.9, 1.1),        # 缩放范围为90%到110%
+#             rotate=(-5, 5),          # 旋转范围为±5度
+#             p=0.3
+#         ),
+#         # 以80%的概率随机调整亮度和对比度
+#         # brightness_limit和contrast_limit控制调整的范围
+#         # 增加这些值可以增强模型对光照变化的鲁棒性
+#         A.RandomBrightnessContrast(
+#             brightness_limit=0.3,  # 亮度调整范围为±30%
+#             contrast_limit=0.3,    # 对比度调整范围为±30%
+#             p=0.8
+#         ),
+#         # 以80%的概率随机调整色调、饱和度和明度
+#         # hue_shift_limit控制色调的变化范围
+#         # sat_shift_limit控制饱和度的变化范围
+#         # val_shift_limit控制明度的变化范围
+#         # 增加这些值可以增强模型对颜色变化的鲁棒性
+#         A.HueSaturationValue(
+#             hue_shift_limit=15,    # 色调调整范围为±15
+#             sat_shift_limit=25,    # 饱和度调整范围为±25
+#             val_shift_limit=25,    # 明度调整范围为±25
+#             p=0.8
+#         ),
+#         # 以50%的概率应用高斯模糊
+#         # blur_limit控制模糊核的大小范围，必须为奇数
+#         # 增加blur_limit的上限可以增强模型对模糊图像的鲁棒性
+#         A.GaussianBlur(
+#             blur_limit=(3, 9),     # 模糊核大小范围为3到9
+#             p=0.5
+#         ),
+#         # 标准化图像，使其均值为0，标准差为1
+#         # 使用ImageNet的均值和标准差
+#         A.Normalize(
+#             mean=(0.485, 0.456, 0.406),  # RGB通道的均值
+#             std=(0.229, 0.224, 0.225)    # RGB通道的标准差
+#         ),
+#         # 将图像重新调整为640x640
+#         A.Resize(height=640, width=640, interpolation=cv2.INTER_LINEAR, p=1.0),
+#         # 将图像转换为PyTorch张量
+#         ToTensorV2()
+#     ],
+#     # 设置边界框的参数
+#     bbox_params=A.BboxParams(
+#         format='yolo',             # 边界框格式为YOLO格式
+#         label_fields=['category_ids'],  # 标签字段
+#         min_visibility=0.5         # 最小可见度阈值，过滤掉可见度低的边界框
+#     ),
+#     # 设置关键点的参数
+#     keypoint_params=A.KeypointParams(
+#         format='xy',               # 关键点格式为(x, y)
+#         remove_invisible=False     # 不移除不可见的关键点
+#     )
+# )
+
+
 common_aug = A.Compose(
     [
-        # 将图像的最长边缩放到不超过640，保持宽高比
+        # 1. 等比例缩放最长边到 <=640 并 pad 到 640×640
         A.LongestMaxSize(max_size=640),
-        # 如果图像尺寸小于640x640，则进行填充，使用常数值填充（黑色）
-        A.PadIfNeeded(min_height=640, min_width=640, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
-        # 以50%的概率随机裁剪512x512的区域
-        A.RandomCrop(height=512, width=512, p=0.5),
-        # 以50%的概率进行水平翻转
-        A.HorizontalFlip(p=0.5),
-        # 以20%的概率进行垂直翻转
-        A.VerticalFlip(p=0.2),
-        # 以30%的概率进行仿射变换，包括平移、缩放和旋转
-        A.Affine(
-            translate_percent=0.05,  # 平移范围为±5%
-            scale=(0.9, 1.1),        # 缩放范围为90%到110%
-            rotate=(-5, 5),          # 旋转范围为±5度
-            p=0.3
-        ),
-        # 以80%的概率随机调整亮度和对比度
-        # brightness_limit和contrast_limit控制调整的范围
-        # 增加这些值可以增强模型对光照变化的鲁棒性
-        A.RandomBrightnessContrast(
-            brightness_limit=0.3,  # 亮度调整范围为±30%
-            contrast_limit=0.3,    # 对比度调整范围为±30%
-            p=0.8
-        ),
-        # 以80%的概率随机调整色调、饱和度和明度
-        # hue_shift_limit控制色调的变化范围
-        # sat_shift_limit控制饱和度的变化范围
-        # val_shift_limit控制明度的变化范围
-        # 增加这些值可以增强模型对颜色变化的鲁棒性
-        A.HueSaturationValue(
-            hue_shift_limit=15,    # 色调调整范围为±15
-            sat_shift_limit=25,    # 饱和度调整范围为±25
-            val_shift_limit=25,    # 明度调整范围为±25
-            p=0.8
-        ),
-        # 以50%的概率应用高斯模糊
-        # blur_limit控制模糊核的大小范围，必须为奇数
-        # 增加blur_limit的上限可以增强模型对模糊图像的鲁棒性
-        A.GaussianBlur(
-            blur_limit=(3, 9),     # 模糊核大小范围为3到9
-            p=0.5
-        ),
-        # 标准化图像，使其均值为0，标准差为1
-        # 使用ImageNet的均值和标准差
-        A.Normalize(
-            mean=(0.485, 0.456, 0.406),  # RGB通道的均值
-            std=(0.229, 0.224, 0.225)    # RGB通道的标准差
-        ),
-        # 将图像重新调整为640x640
-        A.Resize(height=640, width=640, interpolation=cv2.INTER_LINEAR, p=1.0),
-        # 将图像转换为PyTorch张量
-        ToTensorV2()
+        A.PadIfNeeded(min_height=640, min_width=640, border_mode=cv2.BORDER_CONSTANT, fill=114, fill_mask=114),
+        # # 2. 几何变换：安全地裁剪 + 平移/缩放/旋转 + 翻转
+        # #    RandomSizedBBoxSafeCrop 保证裁剪后保留至少一个 box
+        # A.OneOf([
+        #     A.RandomSizedBBoxSafeCrop(height=640,
+        #                               width=640,
+        #                               erosion_rate=0.0,  # 可微调，越大裁掉越多
+        #                               p=0.5),
+        #     A.ShiftScaleRotate(shift_limit=0.05,
+        #                        scale_limit=0.1,
+        #                        rotate_limit=5,
+        #                        border_mode=cv2.BORDER_CONSTANT,
+        #                        value=114,
+        #                        mask_value=114,
+        #                        p=0.5),
+        # ], p=0.7),
+        # A.HorizontalFlip(p=0.5),
+        # A.VerticalFlip(p=0.2),
+
+        # 3. 最后标准化 + 转 Tensor
+        A.Normalize(mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225)),
+        ToTensorV2(),
     ],
-    # 设置边界框的参数
     bbox_params=A.BboxParams(
-        format='yolo',             # 边界框格式为YOLO格式
-        label_fields=['category_ids'],  # 标签字段
-        min_visibility=0.5         # 最小可见度阈值，过滤掉可见度低的边界框
+        format='yolo',                # 传入 [cx,cy,w,h] 归一化
+        label_fields=['category_ids'],
+        min_visibility=0.1            # 只要可见度≥10%就保留
     ),
-    # 设置关键点的参数
-    keypoint_params=A.KeypointParams(
-        format='xy',               # 关键点格式为(x, y)
-        remove_invisible=False     # 不移除不可见的关键点
-    )
 )
 
 def letterbox(img, new_size=640, color=(114, 114, 114)):
