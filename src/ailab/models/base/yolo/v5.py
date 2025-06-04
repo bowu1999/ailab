@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from torchvision.ops import generalized_box_iou, nms
@@ -108,43 +109,72 @@ class Detect(nn.Module):
         self.no = nc + 5
         self.na = len(anchors[0]) // 2
         self.nl = len(anchors)
-        # 关键修改：把这两个改为 buffer
+        
+        # 注册为buffer
         self.register_buffer('anchors', torch.tensor(anchors, dtype=torch.float32).view(self.nl, -1, 2))
         self.register_buffer('stride', torch.tensor(strides, dtype=torch.float32))
+        
         self.grid = [torch.zeros(1)] * self.nl
         self.m = nn.ModuleList(
             nn.Conv2d(ch[i], self.no * self.na, 1) for i in range(self.nl)
         )
+        
+        # 初始化偏置
+        self._initialize_biases()
+
+    def _initialize_biases(self):
+        """初始化检测层的偏置"""
+        import math
+        
+        for mi, s in zip(self.m, self.stride):
+            # 获取bias的shape
+            b = mi.bias.data.view(self.na, -1)
+            
+            # 创建新的bias值
+            new_bias = torch.zeros_like(b)
+            
+            # 复制原始值
+            new_bias.copy_(b)
+            
+            # Objectness bias (使预测初始值约为0.01)
+            new_bias[:, 4] += math.log(0.01 / 0.99)
+            
+            # Class bias (使预测初始值约为1/nc)
+            if self.nc > 1:
+                new_bias[:, 5:] += math.log(0.001 / (self.nc - 0.999))
+            
+            # 设置新的bias
+            mi.bias.data.copy_(new_bias.view(-1))
 
     def forward(self, features):
         raw_preds = []
         decoded = []
+        
         for i, x in enumerate(features):
             bs, _, ny, nx = x.shape
             p = self.m[i](x).view(bs, self.na, self.no, ny, nx)
-            p = p.permute(0, 1, 3, 4, 2).contiguous()  # 原始输出 logits
+            p = p.permute(0, 1, 3, 4, 2).contiguous()
             raw_preds.append(p)
-            # 如果 grid 不匹配就重新生成
+            
+            # 如果grid不匹配就重新生成
             if self.grid[i].shape[2:] != (ny, nx):
                 yv, xv = torch.meshgrid(
                     torch.arange(ny, device=p.device),
                     torch.arange(nx, device=p.device),
                     indexing='ij'
                 )
-                self.grid[i] = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float().to(p.device)
+                self.grid[i] = torch.stack((xv, yv), 2).view(1, 1, ny, nx, 2).float()
+            
             # 解码过程，仅用于推理
-            psig = p.sigmoid().clone()
-            xy = (psig[..., :2] * 2 - 0.5 + self.grid[i]) * self.stride[i]
-            wh = (psig[..., 2:4] * 2) ** 2 * self.anchors[i].view(1, self.na, 1, 1, 2)
-            conf = psig[..., 4:5]
-            cls = psig[..., 5:]
-            decoded.append(torch.cat([xy, wh, conf, cls], dim=-1))
-
-        # 如果是训练阶段，返回 raw logits；如果是推理阶段，返回解码结果
-        # 长度 3 的列表，表示每个层的输出
-        # [(batch_size, na, ny, nx, no), (batch_size, na, ny, nx, no), (batch_size, na, ny, nx, no)]
+            if not self.training:
+                psig = p.sigmoid()
+                xy = (psig[..., :2] * 2 - 0.5 + self.grid[i]) * self.stride[i]
+                wh = (psig[..., 2:4] * 2) ** 2 * self.anchors[i].view(1, self.na, 1, 1, 2)
+                conf = psig[..., 4:5]
+                cls = psig[..., 5:]
+                decoded.append(torch.cat([xy, wh, conf, cls], dim=-1))
+        
         return raw_preds if self.training else decoded
-
 
 # --------------------------------------------
 # YOLOv5 Model
