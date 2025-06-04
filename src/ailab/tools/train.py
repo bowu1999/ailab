@@ -14,6 +14,9 @@ from ailab.hooks_extra import TensorboardHook, WandbHook
 from ailab.builder import build_dataset, build_model, build_optimizer, build_loss
 from ailab.utils import call_fn, OutputWrapper
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 同步CUDA操作，帮助定位错误
+torch.autograd.set_detect_anomaly(True)   # 检测梯度异常
+
 
 def ailab_train(cfg):
     """基于配置文件的训练接口。"""
