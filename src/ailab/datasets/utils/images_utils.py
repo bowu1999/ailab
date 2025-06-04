@@ -1,8 +1,11 @@
 import cv2
+import torch
 import random
+import colorsys
 import numpy as np
 from PIL import Image
 from pathlib import Path
+from matplotlib import patches
 import matplotlib.pyplot as plt
 from typing import Union, Sequence, Tuple, Dict, List
 
@@ -208,62 +211,351 @@ def display_image_from_cv2(image):
     plt.show()
 
 
-def grouped_strip_plot(
-    df,
-    group_by_fields,
-    sort_by_field,
-    plot_fields,
-    target_group_idx=0,
-    figsize=(12, 6),
-    gap=50
-):
+def visualize_masks(dataset, idx, alpha=0.5, show_boxes=False, figsize=(12, 8)):
     """
-    按照指定字段分组，组内排序，绘制指定组的多个字段在统一横轴、不同纵轴上的图。
-    横轴为排序后的序号（从1开始），纵轴为各字段数值加上偏移量。
-
-    Parameters:
-        df: DataFrame 原始数据
-        group_by_fields: list[str] 用于分组的列
-        sort_by_field: str 组内排序字段
-        plot_fields: list[str] 要绘制的字段（同一组中的多个字段）
-        target_group_idx: int 要绘制的组索引
-        figsize: tuple 绘图大小
-        gap: int 各字段之间纵轴间距
+    可视化分割数据集中的图像和掩码
+    
+    Args:
+        dataset: COCOSegmentationDataset实例
+        idx: 样本索引
+        alpha: mask透明度 (0-1)
+        show_boxes: 是否显示边界框（分割数据集通常不需要）
+        figsize: 图像大小
     """
-    grouped = list(df.groupby(group_by_fields))
-
-    if target_group_idx >= len(grouped):
-        raise IndexError("指定的组索引超出了可用范围")
-
-    group_key, group_df = grouped[target_group_idx]
-    group_df = group_df.sort_values(by=sort_by_field).reset_index(drop=True)
-
-    x = np.arange(1, len(group_df) + 1)  # 横轴为序号
-    n_fields = len(plot_fields)
-
-    plt.figure(figsize=figsize)
-
-    yticks = []
-    yticklabels = []
-
-    for i, field in enumerate(plot_fields):
-        y_offset = i * gap
-        y = group_df[field].values + y_offset
-        plt.plot(x, y, label=field)
-
-        # 设置字段所在范围的中点作为 ytick
-        yticks.append(np.median(group_df[field].values) + y_offset)
-        yticklabels.append(field)
-
-        # 添加数据点注释
-        for xi, yi in zip(x[::max(1, len(x)//20)], y[::max(1, len(y)//20)]):
-            plt.text(xi, yi, f"{yi - y_offset:.1f}", fontsize=6, ha='center')
-
-    plt.xticks(x[::max(1, len(x)//20)])  # 控制横轴刻度密度
-    plt.yticks(yticks, yticklabels)
-    plt.xlabel("Index (sorted by field)", fontsize=12)
-    plt.title(f"Group: {group_key}", fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.legend(bbox_to_anchor=(1.01, 1), loc='upper left')  # 图例放到绘图框外
+    # 获取数据
+    sample = dataset[idx]
+    img_tensor = sample['image']
+    # 检查是语义分割还是实例分割
+    if dataset.mode == 'semantic':
+        label = sample['label']
+        target = None
+    else:
+        target = sample['target']
+        label = None
+    # 处理图像（不需要反归一化，因为数据集已经返回0-1范围）
+    img = img_tensor.permute(1, 2, 0).cpu().numpy()
+    # 创建图形
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    ax.imshow(img)
+    if dataset.mode == 'semantic':
+        # 语义分割模式
+        label_np = label.cpu().numpy()
+        # 创建彩色overlay
+        h, w = label_np.shape
+        overlay = np.zeros((h, w, 3), dtype=np.float32)
+        # 为每个类别分配颜色
+        for class_id in range(dataset.num_classes):
+            mask = label_np == class_id
+            if mask.any():
+                color = plt.cm.tab20(class_id / dataset.num_classes)[:3]
+                overlay[mask] = color
+        # 叠加显示
+        ax.imshow(overlay, alpha=alpha)
+    else:
+        # 实例分割模式
+        if 'masks' in target and len(target['masks']) > 0:
+            masks = target['masks'].cpu().numpy()
+            labels = target['labels'].cpu().numpy()
+            # 创建彩色overlay
+            h, w = img.shape[:2]
+            overlay = np.zeros((h, w, 3), dtype=np.float32)
+            # 为每个实例生成颜色
+            num_instances = len(masks)
+            for i, (mask, label) in enumerate(zip(masks, labels)):
+                hue = i / max(num_instances, 1)
+                color = colorsys.hsv_to_rgb(hue, 0.8, 0.8)
+                # 应用mask
+                for c in range(3):
+                    overlay[:, :, c] = np.maximum(overlay[:, :, c], mask * color[c])
+            # 叠加显示
+            ax.imshow(overlay, alpha=alpha)
+            # 添加标签
+            for i, (mask, label) in enumerate(zip(masks, labels)):
+                if mask.sum() > 0:
+                    # 找到mask的中心
+                    y_indices, x_indices = np.where(mask > 0)
+                    cy = int(np.mean(y_indices))
+                    cx = int(np.mean(x_indices))
+                    # 获取类别名称
+                    if hasattr(dataset, 'categories'):
+                        cat_name = next(
+                            (c['name'] for c in dataset.categories if dataset.cat_map[c['id']] == label),
+                            f"Class {label}"
+                        )
+                    else:
+                        cat_name = f"Class {label}"
+                    ax.text(cx, cy, cat_name, color='white',
+                           bbox=dict(facecolor='black', alpha=0.5),
+                           fontsize=8, ha='center', va='center')
+    ax.axis('off')
+    plt.title(f'Sample {idx} - {dataset.mode.capitalize()} Mode')
     plt.tight_layout()
     plt.show()
+    
+    # 返回统计信息
+    info = {
+        'image_shape': img.shape,
+        'mode': dataset.mode
+    }
+    
+    if dataset.mode == 'semantic':
+        unique_labels = torch.unique(label)
+        info['num_classes_present'] = len(unique_labels[unique_labels != dataset.ignore_label])
+    else:
+        info['num_instances'] = len(target['masks']) if target else 0
+    
+    return info
+
+
+def tensor_to_cv2_image(tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+        """
+        将一个标准化后的PyTorch张量图像还原为OpenCV格式。
+        
+        参数:
+        tensor : torch.Tensor
+            输入的标准化后的图像张量，形状应为[C, H, W]。
+        mean : list of float, optional
+            标准化时使用的平均值，默认为ImageNet的平均值。
+        std : list of float, optional
+            标准化时使用标准差，默认为ImageNet的标准差。
+            
+        返回:
+        img : numpy.ndarray
+            还原后的OpenCV格式图像，形状为[H, W, C]，类型为uint8。
+        """
+        # 将tensor移到cpu并转换为numpy数组
+        tensor = tensor.clone().detach().cpu()
+        
+        # 去掉批处理维度，如果存在的话
+        if len(tensor.shape) == 4:
+            tensor = tensor.squeeze(0)
+        
+        # 反归一化：乘以标准差并加上平均值
+        for t, m, s in zip(tensor, mean, std):
+            t.mul_(s).add_(m)
+        
+        # 如果最大值小于等于1，则说明还在[0, 1]范围内，需要缩放到[0, 255]
+        if tensor.max() <= 1:
+            tensor = tensor * 255
+        
+        # 将tensor转换为numpy数组，并调整通道顺序（C, H, W -> H, W, C）
+        img = tensor.permute(1, 2, 0).numpy().astype(np.uint8)
+        
+        # 如果图像是灰度图（单通道），则不需要转换颜色空间
+        if img.shape[2] == 3:
+            # OpenCV使用BGR格式，所以需要转换RGB到BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        return img
+
+
+def process_segmentation_output(output, original_image, alpha=0.5, colormap='tab20', return_colored_mask=False):
+    """
+    将语义分割模型的输出处理成mask并覆盖到原图
+    
+    Args:
+        output: 模型输出，形状为 (B, num_classes, H, W)
+        original_image: 原始图像，可以是:
+            - numpy array (H, W, 3) 
+            - torch tensor (3, H, W) 或 (H, W, 3)
+        alpha: mask的透明度
+        colormap: 颜色映射方案
+        return_colored_mask: 是否返回彩色mask
+    
+    Returns:
+        overlayed_image: 叠加了mask的图像
+        (可选) colored_mask: 彩色mask
+    """
+    # 处理输出
+    if output.dim() == 4:
+        output = output[0]  # 移除batch维度，变成 (80, 512, 1024)
+    
+    # 获取每个像素的类别（argmax）
+    pred_mask = output.argmax(dim=0)  # (512, 1024)
+    pred_mask = pred_mask.cpu().numpy()
+    
+    # 处理原始图像
+    if isinstance(original_image, torch.Tensor):
+        if original_image.shape[0] == 3:  # (3, H, W)
+            original_image = original_image.permute(1, 2, 0)
+        original_image = original_image.cpu().numpy()
+    
+    # 确保图像是0-1范围或0-255范围
+    if original_image.max() <= 1.0:
+        original_image = (original_image * 255).astype(np.uint8)
+    else:
+        original_image = original_image.astype(np.uint8)
+    
+    # 调整原图尺寸以匹配mask
+    h_mask, w_mask = pred_mask.shape
+    if original_image.shape[:2] != (h_mask, w_mask):
+        original_image = cv2.resize(original_image, (w_mask, h_mask), interpolation=cv2.INTER_LINEAR)
+    
+    # 创建彩色mask
+    colored_mask = create_colored_mask(pred_mask, num_classes=output.shape[0], colormap=colormap)
+    
+    # 叠加mask到原图
+    overlayed = overlay_mask_on_image(original_image, colored_mask, alpha=alpha)
+    
+    if return_colored_mask:
+        return overlayed, colored_mask
+    return overlayed
+
+
+def create_colored_mask(mask, num_classes=80, colormap='tab20'):
+    """
+    为每个类别创建不同颜色的mask
+    
+    Args:
+        mask: 类别mask，形状为 (H, W)
+        num_classes: 总类别数
+        colormap: matplotlib的colormap名称
+    
+    Returns:
+        colored_mask: RGB彩色mask，形状为 (H, W, 3)
+    """
+    h, w = mask.shape
+    colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # 获取colormap
+    if colormap == 'custom':
+        # 自定义颜色列表（更鲜艳的颜色）
+        colors = generate_distinct_colors(num_classes)
+    else:
+        cmap = plt.cm.get_cmap(colormap)
+        colors = [cmap(i / max(num_classes-1, 1))[:3] for i in range(num_classes)]
+    
+    # 为每个类别分配颜色
+    unique_labels = np.unique(mask)
+    for label in unique_labels:
+        if label < num_classes:  # 确保标签在范围内
+            color = (np.array(colors[label]) * 255).astype(np.uint8)
+            colored_mask[mask == label] = color
+    
+    return colored_mask
+
+
+def generate_distinct_colors(n):
+    """生成n个视觉上易区分的颜色"""
+    import colorsys
+    colors = []
+    for i in range(n):
+        hue = i / n
+        # 跳过接近黄色的颜色（因为在白色背景上不明显）
+        if 0.15 < hue < 0.25:
+            hue += 0.1
+        saturation = 0.9
+        value = 0.9
+        rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+        colors.append(rgb)
+    return colors
+
+
+def overlay_mask_on_image(image, colored_mask, alpha=0.5):
+    """
+    将彩色mask叠加到图像上
+    
+    Args:
+        image: 原始图像 (H, W, 3)
+        colored_mask: 彩色mask (H, W, 3)
+        alpha: 透明度
+    
+    Returns:
+        overlayed: 叠加后的图像
+    """
+    # 确保数据类型一致
+    if image.dtype != colored_mask.dtype:
+        colored_mask = colored_mask.astype(image.dtype)
+    
+    # 叠加
+    overlayed = cv2.addWeighted(image, 1-alpha, colored_mask, alpha, 0)
+    
+    return overlayed
+
+
+def visualize_segmentation_result(output, original_image, class_names=None, figsize=(15, 5)):
+    """
+    可视化语义分割结果
+    
+    Args:
+        output: 模型输出 (1, num_classes, H, W)
+        original_image: 原始图像
+        class_names: 类别名称列表（可选）
+        figsize: 图像大小
+    """
+    # 处理输出
+    overlayed, colored_mask = process_segmentation_output(
+        output, original_image, alpha=0.5, return_colored_mask=True
+    )
+    
+    # 获取预测的类别
+    if output.dim() == 4:
+        output = output[0]
+    pred_mask = output.argmax(dim=0).cpu().numpy()
+    unique_classes = np.unique(pred_mask)
+    
+    # 创建图形
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # 显示原图
+    if isinstance(original_image, torch.Tensor):
+        if original_image.shape[0] == 3:
+            original_image = original_image.permute(1, 2, 0)
+        original_image = original_image.cpu().numpy()
+    if original_image.max() <= 1:
+        original_image = (original_image * 255).astype(np.uint8)
+    
+    axes[0].imshow(original_image)
+    axes[0].set_title('Original Image')
+    axes[0].axis('off')
+    
+    # 显示彩色mask
+    axes[1].imshow(colored_mask)
+    axes[1].set_title('Segmentation Mask')
+    axes[1].axis('off')
+    
+    # 显示叠加结果
+    axes[2].imshow(overlayed)
+    axes[2].set_title('Overlayed Result')
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    
+    # 打印类别信息
+    print(f"Detected {len(unique_classes)} classes: {unique_classes.tolist()}")
+    if class_names:
+        print("Classes present:")
+        for cls in unique_classes:
+            if cls < len(class_names):
+                print(f"  - Class {cls}: {class_names[cls]}")
+    
+    plt.show()
+    
+    return overlayed
+
+
+# 批量处理函数
+def process_batch_segmentation(outputs, images, alpha=0.5):
+    """
+    批量处理语义分割输出
+    
+    Args:
+        outputs: 模型输出 (B, num_classes, H, W)
+        images: 原始图像批次 (B, 3, H, W)
+        alpha: 透明度
+    
+    Returns:
+        overlayed_images: 叠加后的图像列表
+    """
+    batch_size = outputs.shape[0]
+    overlayed_images = []
+    
+    for i in range(batch_size):
+        overlayed = process_segmentation_output(
+            outputs[i:i+1], 
+            images[i], 
+            alpha=alpha
+        )
+        overlayed_images.append(overlayed)
+    
+    return overlayed_images
